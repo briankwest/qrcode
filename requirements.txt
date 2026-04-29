@@ -1,0 +1,13 @@
+torch
+torchvision
+diffusers>=0.27
+transformers
+accelerate
+peft
+safetensors
+qrcode[pil]
+pillow
+opencv-python
+fastapi
+uvicorn[standard]
+python-multipart
