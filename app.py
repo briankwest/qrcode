@@ -11,7 +11,8 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from qrart import Generator, GenerationRequest, STYLE_PRESETS
+from qrart import COMPOSITIONS, Generator, GenerationRequest, STYLE_PRESETS
+from qrart.pipeline import MODELS
 
 ROOT = Path(__file__).parent
 STATIC_DIR = ROOT / "static"
@@ -22,37 +23,48 @@ app = FastAPI(title="QR Art Studio")
 app.mount("/outputs", StaticFiles(directory=OUTPUT_DIR), name="outputs")
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
-_generator: Generator | None = None
+# One Generator per model, lazily created on first use. Models that haven't
+# been used in this session don't consume memory. Switching back to a model
+# you used earlier is instant.
+_generators: dict[str, Generator] = {}
 _gen_lock = threading.Lock()
 # Diffusion is single-GPU/MPS — serialize requests so we don't OOM.
 _run_lock = threading.Lock()
 
 
-def get_generator() -> Generator:
-    global _generator
+def get_generator(model: str | None = None) -> Generator:
+    key = model if model in MODELS else "photoreal"
     with _gen_lock:
-        if _generator is None:
-            _generator = Generator()
-    return _generator
+        if key not in _generators:
+            _generators[key] = Generator(base_model=key)
+    return _generators[key]
 
 
 class GenerateBody(BaseModel):
     data: str = Field(..., description="URL or text to encode")
     prompt: str
     style: str = "photoreal"
+    model: str = "photoreal"
     negative_prompt: str | None = None
     candidates: int = 3
     steps: int = 28
     controlnet_scale: float = 1.35
+    tile_scale: float = 0.0
     control_end: float = 1.0
     guidance: float = 7.5
     refine: bool = True
     refine_strength: float = 0.30
     refine_steps: int = 20
     size: int = 768
+    composition: str = "standalone"
     seed: int | None = None
     require_scan: bool = True
     fast_mode: bool = False
+    hires_fix: bool = False
+    hires_target: int = 1024
+    hires_strength: float = 0.20
+    adetailer: bool = False
+    adetailer_strength: float = 0.35
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -63,20 +75,29 @@ def index() -> HTMLResponse:
 @app.get("/api/health")
 def health() -> dict[str, Any]:
     g = get_generator()
+    loaded_models = [k for k, gen in _generators.items() if gen.pipeline._pipe is not None]
     return {
         "ok": True,
         "device": g.pipeline.device,
         "loaded": g.pipeline._pipe is not None,
         "base_model": g.pipeline.base_model,
         "styles": list(STYLE_PRESETS.keys()),
+        "compositions": list(COMPOSITIONS.keys()),
+        "models": list(MODELS.keys()),
+        "loaded_models": loaded_models,
     }
 
 
+class WarmBody(BaseModel):
+    model: str = "photoreal"
+
+
 @app.post("/api/warm")
-def warm() -> dict[str, Any]:
+def warm(body: WarmBody | None = None) -> dict[str, Any]:
     t0 = time.time()
-    get_generator().warm()
-    return {"ok": True, "elapsed_s": round(time.time() - t0, 2)}
+    model = body.model if body else "photoreal"
+    get_generator(model).warm()
+    return {"ok": True, "elapsed_s": round(time.time() - t0, 2), "model": model}
 
 
 @app.post("/api/generate")
@@ -101,11 +122,16 @@ def generate(body: GenerateBody) -> dict[str, Any]:
         controlnet_scale = body.controlnet_scale
 
     print(
-        f"[generate] prompt={body.prompt[:60]!r}... "
-        f"scale={body.controlnet_scale} refine={body.refine}/{body.refine_strength} "
-        f"candidates={body.candidates} fast={body.fast_mode} seed={body.seed}",
+        f"[generate] model={body.model} prompt={body.prompt[:60]!r}... "
+        f"scale={body.controlnet_scale} tile={body.tile_scale} "
+        f"refine={body.refine}/{body.refine_strength} "
+        f"composition={body.composition} candidates={body.candidates} "
+        f"fast={body.fast_mode} hires={body.hires_fix} adetailer={body.adetailer} "
+        f"seed={body.seed}",
         flush=True,
     )
+
+    composition = body.composition if body.composition in COMPOSITIONS else "standalone"
 
     req = GenerationRequest(
         data=body.data,
@@ -115,20 +141,27 @@ def generate(body: GenerateBody) -> dict[str, Any]:
         candidates=max(1, min(body.candidates, 6)),
         steps=steps,
         controlnet_scale=controlnet_scale,
+        tile_scale=max(0.0, min(body.tile_scale, 1.0)),
         control_end=body.control_end,
         guidance=guidance,
         refine=body.refine,
         refine_strength=max(0.05, min(body.refine_strength, 0.6)),
         refine_steps=refine_steps,
         size=body.size,
+        composition=composition,
         seed=body.seed,
         require_scan=body.require_scan,
         fast_mode=body.fast_mode,
+        hires_fix=body.hires_fix,
+        hires_target=max(768, min(body.hires_target, 1536)),
+        hires_strength=max(0.05, min(body.hires_strength, 0.45)),
+        adetailer=body.adetailer,
+        adetailer_strength=max(0.1, min(body.adetailer_strength, 0.6)),
     )
 
     t0 = time.time()
     with _run_lock:
-        result = get_generator().generate(req)
+        result = get_generator(body.model).generate(req)
     elapsed = round(time.time() - t0, 2)
 
     job_id = uuid.uuid4().hex[:12]

@@ -261,6 +261,19 @@
     <label for="prompt">Prompt</label>
     <textarea id="prompt" placeholder="describe what the image should look like">a majestic snow leopard standing on a cliff at sunrise, dramatic lighting, mountains in background</textarea>
 
+    <label for="model">Model</label>
+    <select id="model">
+      <option value="photoreal" selected>Realistic Vision V6 — all-around photoreal (default)</option>
+      <option value="photon">Photon V1 — natural landscapes, warm/film feel</option>
+      <option value="epic">epiCRealism — sharp, dramatic, high-detail</option>
+      <option value="absolute">AbsoluteReality — versatile, balanced</option>
+      <option value="analog">Analog Diffusion — film grain, 70s/80s analog aesthetic</option>
+      <option value="dreamlike">Dreamlike Photoreal 2.0 — soft, golden, painterly</option>
+      <option value="openjourney">OpenJourney v4 — Midjourney-style, moody/cinematic</option>
+      <option value="dreamshaper">DreamShaper 8 — stylized/painterly</option>
+    </select>
+    <div class="hint" id="modelHint">Each model is ~4GB and downloaded on first use. Switch between them to compare aesthetics.</div>
+
     <label for="style">Style</label>
     <select id="style">
       <option value="photoreal" selected>photoreal</option>
@@ -270,6 +283,26 @@
     </select>
     <div class="hint">Photoreal pairs best with the refine pass for that "looks like a photo" finish.</div>
 
+    <label for="composition">Composition</label>
+    <select id="composition">
+      <option value="standalone" selected>Standalone — QR fills frame (768×768)</option>
+      <option value="subject-portrait">Subject + QR — character above, QR below (768×1024)</option>
+      <option value="scene-landscape">QR scene — wide landscape, QR as monolith (1024×768)</option>
+      <option value="garment">QR garment — fashion shot, QR is the outfit (768×1024)</option>
+    </select>
+    <div class="hint" id="compositionHint">QR fills the entire frame. Other options place the QR as a feature inside a larger scene (~1.5–2× slower).</div>
+    <svg id="compositionDiagram" viewBox="0 0 100 100" style="width:100%; max-width:140px; margin-top:6px; display:block;">
+      <rect x="0" y="0" width="100" height="100" fill="#16161a" stroke="#232329" />
+      <rect id="diagramQR" x="0" y="0" width="100" height="100" fill="url(#qrPattern)" stroke="#7c5cff" stroke-width="0.5" />
+      <defs>
+        <pattern id="qrPattern" patternUnits="userSpaceOnUse" width="6" height="6">
+          <rect width="6" height="6" fill="#1a1a20" />
+          <rect x="0" y="0" width="3" height="3" fill="#5a5a64" />
+          <rect x="3" y="3" width="3" height="3" fill="#5a5a64" />
+        </pattern>
+      </defs>
+    </svg>
+
     <h2 style="margin-top: 22px;">Tuning</h2>
 
     <div class="row">
@@ -278,6 +311,13 @@
       <span class="val" id="scaleVal">1.35</span>
     </div>
     <div class="hint">Higher = QR scans more reliably but more visible. With refine on, 1.3–1.5 is the sweet spot.</div>
+
+    <div class="row" style="margin-top: 12px;">
+      <label>Tile guidance</label>
+      <input type="range" id="tileScale" min="0.0" max="0.8" step="0.05" value="0.0" />
+      <span class="val" id="tileScaleVal">0.00</span>
+    </div>
+    <div class="hint">Stacks Tile ControlNet alongside QR Monster. 0 = off; 0.3–0.5 nudges output toward photo coherence (less QR-noise).</div>
 
     <div class="row" style="margin-top: 12px;">
       <label>Steps</label>
@@ -325,6 +365,43 @@
         <span class="val" id="refineStrengthVal">0.30</span>
       </div>
       <div class="hint">Lower = preserves QR & adds polish. Higher = more photoreal but QR may break.</div>
+    </div>
+
+    <div class="toggle-row">
+      <div>
+        <div class="label">Hi-res fix</div>
+        <div class="desc">Upscale winner + low-strength img2img for sharper detail. Adds ~30s.</div>
+      </div>
+      <div class="switch" id="hiresSwitch"></div>
+    </div>
+    <div id="hiresControls" style="display:none;">
+      <div class="row" style="margin-top: 12px;">
+        <label>Hi-res target</label>
+        <input type="range" id="hiresTarget" min="896" max="1536" step="64" value="1024" />
+        <span class="val" id="hiresTargetVal">1024</span>
+      </div>
+      <div class="row" style="margin-top: 8px;">
+        <label>Hi-res strength</label>
+        <input type="range" id="hiresStrength" min="0.10" max="0.40" step="0.05" value="0.20" />
+        <span class="val" id="hiresStrengthVal">0.20</span>
+      </div>
+      <div class="hint">Strength must stay low — high values wash out the QR pattern.</div>
+    </div>
+
+    <div class="toggle-row">
+      <div>
+        <div class="label">ADetailer (faces)</div>
+        <div class="desc">Detect faces, re-render each at 512×512 for sharper features. Adds ~10s/face.</div>
+      </div>
+      <div class="switch" id="adetailerSwitch"></div>
+    </div>
+    <div id="adetailerControls" style="display:none;">
+      <div class="row" style="margin-top: 12px;">
+        <label>Face strength</label>
+        <input type="range" id="adetailerStrength" min="0.20" max="0.55" step="0.05" value="0.35" />
+        <span class="val" id="adetailerStrengthVal">0.35</span>
+      </div>
+      <div class="hint">Only fires if cv2 finds a face. No-op otherwise.</div>
     </div>
 
     <button class="primary" id="go">Generate</button>
@@ -379,7 +456,10 @@
 
 <script>
   const $ = (id) => document.getElementById(id);
-  const ranges = ["scale", "steps", "candidates", "refineStrength"];
+  const ranges = [
+    "scale", "tileScale", "steps", "candidates", "refineStrength",
+    "hiresTarget", "hiresStrength", "adetailerStrength",
+  ];
   ranges.forEach((id) => {
     const el = $(id), out = $(id + "Val");
     el.addEventListener("input", () => (out.textContent = parseFloat(el.value).toFixed(el.step.includes(".") ? 2 : 0)));
@@ -512,10 +592,57 @@
   $("qrType").addEventListener("change", () => renderQRFields($("qrType").value));
   renderQRFields("url");
 
+  // ---- Composition diagram ----
+  // Draws a tiny SVG showing where the QR sits inside the canvas for the
+  // currently-selected composition. Helps users see what the layout will be
+  // before generating.
+  const COMPOSITION_LAYOUTS = {
+    "standalone":        { canvas: [768, 768],  qr: [768, 768], pos: [0, 0],     hint: "QR fills the entire frame. Fastest." },
+    "subject-portrait":  { canvas: [768, 1024], qr: [640, 640], pos: [64, 320],  hint: "Portrait canvas. Subject above, QR below — astronaut/character with QR-feature compositions." },
+    "scene-landscape":   { canvas: [1024, 768], qr: [600, 600], pos: [400, 84],  hint: "Wide canvas. QR appears as a richly patterned monolith on the right side." },
+    "garment":           { canvas: [768, 1024], qr: [600, 600], pos: [84, 320],  hint: "Portrait canvas. QR is rendered as the patterned outfit on a person." },
+  };
+  function renderCompositionDiagram(name) {
+    const c = COMPOSITION_LAYOUTS[name] || COMPOSITION_LAYOUTS["standalone"];
+    const [cw, ch] = c.canvas;
+    const [qw, qh] = c.qr;
+    const [qx, qy] = c.pos;
+    // Scale to fit a 100x100 viewbox preserving aspect.
+    const scale = 100 / Math.max(cw, ch);
+    const svgCw = cw * scale, svgCh = ch * scale;
+    const svg = $("compositionDiagram");
+    svg.setAttribute("viewBox", `0 0 ${svgCw} ${svgCh}`);
+    // Update canvas + qr rects
+    const rects = svg.querySelectorAll("rect");
+    // first rect is the canvas, second is the QR
+    rects[0].setAttribute("width", svgCw);
+    rects[0].setAttribute("height", svgCh);
+    const qr = $("diagramQR");
+    qr.setAttribute("x", qx * scale);
+    qr.setAttribute("y", qy * scale);
+    qr.setAttribute("width", qw * scale);
+    qr.setAttribute("height", qh * scale);
+    $("compositionHint").textContent = c.hint;
+  }
+  $("composition").addEventListener("change", () => renderCompositionDiagram($("composition").value));
+  renderCompositionDiagram("standalone");
+
   const refineSwitch = $("refineSwitch");
   refineSwitch.addEventListener("click", () => {
     refineSwitch.classList.toggle("on");
     $("refineControls").style.display = refineSwitch.classList.contains("on") ? "block" : "none";
+  });
+
+  const hiresSwitch = $("hiresSwitch");
+  hiresSwitch.addEventListener("click", () => {
+    hiresSwitch.classList.toggle("on");
+    $("hiresControls").style.display = hiresSwitch.classList.contains("on") ? "block" : "none";
+  });
+
+  const adetailerSwitch = $("adetailerSwitch");
+  adetailerSwitch.addEventListener("click", () => {
+    adetailerSwitch.classList.toggle("on");
+    $("adetailerControls").style.display = adetailerSwitch.classList.contains("on") ? "block" : "none";
   });
 
   // Fast mode: when on, the steps slider auto-jumps to 6 (LCM's sweet spot)
@@ -540,19 +667,26 @@
     try {
       const r = await fetch("/api/health");
       const j = await r.json();
-      const model = (j.base_model || "").split("/").pop();
-      $("device").textContent = `${j.device} · ${model || "?"}${j.loaded ? " · loaded" : " · cold"}`;
+      const loaded = (j.loaded_models || []);
+      const summary = loaded.length ? `loaded: ${loaded.join(", ")}` : "cold";
+      $("device").textContent = `${j.device} · ${summary}`;
       return j;
     } catch {
       $("device").textContent = "offline";
     }
   }
-  // Auto-warm so the first generate isn't a cold model load.
+  // Auto-warm the currently-selected model on page load.
   (async () => {
     const h = await refreshHealth();
-    if (h && !h.loaded) {
-      $("status").textContent = "Warming model in background…";
-      fetch("/api/warm", { method: "POST" })
+    const selected = $("model").value;
+    const loaded = (h?.loaded_models || []);
+    if (h && !loaded.includes(selected)) {
+      $("status").textContent = `Warming ${selected} in background…`;
+      fetch("/api/warm", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: selected }),
+      })
         .then((r) => r.json())
         .then((j) => {
           $("status").textContent = `Model warm (${j.elapsed_s}s).`;
@@ -647,7 +781,10 @@
       data: payload,
       prompt: $("prompt").value,
       style: $("style").value,
+      model: $("model").value,
+      composition: $("composition").value,
       controlnet_scale: parseFloat($("scale").value),
+      tile_scale: parseFloat($("tileScale").value),
       steps: parseInt($("steps").value, 10),
       candidates: parseInt($("candidates").value, 10),
       size: parseInt($("size").value, 10),
@@ -655,6 +792,11 @@
       refine: refine,
       refine_strength: parseFloat($("refineStrength").value),
       fast_mode: fast,
+      hires_fix: hiresSwitch.classList.contains("on"),
+      hires_target: parseInt($("hiresTarget").value, 10),
+      hires_strength: parseFloat($("hiresStrength").value),
+      adetailer: adetailerSwitch.classList.contains("on"),
+      adetailer_strength: parseFloat($("adetailerStrength").value),
     };
 
     try {

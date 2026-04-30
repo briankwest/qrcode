@@ -4,7 +4,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from . import Generator, GenerationRequest
+from . import COMPOSITIONS, Generator, GenerationRequest
 from .qr import make_qr
 from .scanner import scan
 from .styles import STYLE_PRESETS, compose
@@ -16,6 +16,12 @@ def main() -> int:
     p.add_argument("--prompt", required=True, help="Image prompt")
     p.add_argument("--out", default="out.png", help="Output PNG path (best candidate)")
     p.add_argument("--style", default="photoreal", choices=list(STYLE_PRESETS.keys()))
+    p.add_argument(
+        "--composition",
+        default="standalone",
+        choices=list(COMPOSITIONS.keys()),
+        help="standalone (768x768), subject-portrait, scene-landscape, garment",
+    )
     p.add_argument("--negative-prompt", default=None)
     p.add_argument("--candidates", type=int, default=4)
     p.add_argument("--steps", type=int, default=28)
@@ -81,6 +87,7 @@ def main() -> int:
         controlnet_scale=args.scale,
         guidance=guidance,
         size=args.size,
+        composition=args.composition,
         seed=args.seed,
         refine=not args.no_refine,
         refine_strength=args.refine_strength,
