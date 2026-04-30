@@ -46,9 +46,9 @@ class GenerateBody(BaseModel):
     style: str = "photoreal"
     model: str = "photoreal"
     negative_prompt: str | None = None
-    candidates: int = 3
+    candidates: int = 5
     steps: int = 28
-    controlnet_scale: float = 1.35
+    controlnet_scale: float = 1.10
     tile_scale: float = 0.0
     control_end: float = 1.0
     guidance: float = 7.5
@@ -138,7 +138,7 @@ def generate(body: GenerateBody) -> dict[str, Any]:
         prompt=body.prompt,
         style=body.style,
         negative_prompt=body.negative_prompt,
-        candidates=max(1, min(body.candidates, 6)),
+        candidates=max(1, min(body.candidates, 8)),
         steps=steps,
         controlnet_scale=controlnet_scale,
         tile_scale=max(0.0, min(body.tile_scale, 1.0)),
@@ -159,10 +159,20 @@ def generate(body: GenerateBody) -> dict[str, Any]:
         adetailer_strength=max(0.1, min(body.adetailer_strength, 0.6)),
     )
 
-    t0 = time.time()
-    with _run_lock:
+    # Non-blocking acquire — surface a busy state instead of silently queueing.
+    # Otherwise stacked clicks pile up minutes-deep behind the lock and look
+    # like timeouts to the browser.
+    if not _run_lock.acquire(blocking=False):
+        raise HTTPException(
+            503,
+            "Generation already in progress. Wait for the current request to finish, then retry.",
+        )
+    try:
+        t0 = time.time()
         result = get_generator(body.model).generate(req)
-    elapsed = round(time.time() - t0, 2)
+        elapsed = round(time.time() - t0, 2)
+    finally:
+        _run_lock.release()
 
     job_id = uuid.uuid4().hex[:12]
     job_dir = OUTPUT_DIR / job_id
