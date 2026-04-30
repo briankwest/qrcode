@@ -30,6 +30,9 @@ _generators: dict[str, Generator] = {}
 _gen_lock = threading.Lock()
 # Diffusion is single-GPU/MPS — serialize requests so we don't OOM.
 _run_lock = threading.Lock()
+# Snapshot of the current in-flight job so /api/health can surface "busy".
+_active: dict[str, Any] = {"model": None, "started_at": None}
+_active_lock = threading.Lock()
 
 
 def get_generator(model: str | None = None) -> Generator:
@@ -76,6 +79,10 @@ def index() -> HTMLResponse:
 def health() -> dict[str, Any]:
     g = get_generator()
     loaded_models = [k for k, gen in _generators.items() if gen.pipeline._pipe is not None]
+    with _active_lock:
+        active_model = _active["model"]
+        active_started = _active["started_at"]
+    busy = active_model is not None
     return {
         "ok": True,
         "device": g.pipeline.device,
@@ -85,6 +92,11 @@ def health() -> dict[str, Any]:
         "compositions": list(COMPOSITIONS.keys()),
         "models": list(MODELS.keys()),
         "loaded_models": loaded_models,
+        "busy": busy,
+        "active_model": active_model,
+        "active_elapsed_s": (
+            round(time.time() - active_started, 1) if active_started else None
+        ),
     }
 
 
@@ -169,9 +181,15 @@ def generate(body: GenerateBody) -> dict[str, Any]:
         )
     try:
         t0 = time.time()
+        with _active_lock:
+            _active["model"] = body.model
+            _active["started_at"] = t0
         result = get_generator(body.model).generate(req)
         elapsed = round(time.time() - t0, 2)
     finally:
+        with _active_lock:
+            _active["model"] = None
+            _active["started_at"] = None
         _run_lock.release()
 
     job_id = uuid.uuid4().hex[:12]
