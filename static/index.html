@@ -688,26 +688,43 @@
       $("device").textContent = "offline";
     }
   }
-  // Auto-warm the currently-selected model on page load.
+  // Warm a model in the background. Fires on page load for the default
+  // selection, and on dropdown change so picking "hyperrealism" doesn't
+  // silently stall the next Generate click on a 4 GB cold download.
+  function warmModel(name, opts = {}) {
+    if (!name) return;
+    const note = opts.silent ? null : ($("status").textContent = `Warming ${name} in background…`);
+    return fetch("/api/warm", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: name }),
+    })
+      .then((r) => r.json())
+      .then((j) => {
+        $("status").textContent = `Model ${name} warm (${j.elapsed_s}s).`;
+        refreshHealth();
+      })
+      .catch(() => ($("status").textContent = `Warm-up of ${name} failed.`));
+  }
+
+  // Page-load auto-warm.
   (async () => {
     const h = await refreshHealth();
     const selected = $("model").value;
     const loaded = (h?.loaded_models || []);
-    if (h && !loaded.includes(selected)) {
-      $("status").textContent = `Warming ${selected} in background…`;
-      fetch("/api/warm", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ model: selected }),
-      })
-        .then((r) => r.json())
-        .then((j) => {
-          $("status").textContent = `Model warm (${j.elapsed_s}s).`;
-          refreshHealth();
-        })
-        .catch(() => ($("status").textContent = "Warm-up failed."));
-    }
+    if (h && !loaded.includes(selected)) warmModel(selected);
   })();
+
+  // On dropdown change, warm the new pick if it's not already loaded. This
+  // fires asynchronously — the user can keep tweaking other settings while
+  // weights download. If they hit Generate before the warm finishes, the
+  // request still works (warm() and load() share the same lock).
+  $("model").addEventListener("change", async () => {
+    const h = await refreshHealth();
+    const selected = $("model").value;
+    const loaded = (h?.loaded_models || []);
+    if (!loaded.includes(selected)) warmModel(selected);
+  });
 
   function setPreview(url) {
     const p = $("preview");
