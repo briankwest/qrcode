@@ -16,12 +16,13 @@ class GenerationRequest:
     prompt: str
     style: str = "photoreal"
     negative_prompt: str | None = None  # overrides the style's default negative
-    candidates: int = 3
+    candidates: int = 5
     steps: int = 28
     guidance: float = 7.5
-    # Sweet spot for "photo + scans": 1.30–1.40. Lower = prettier but doesn't
-    # decode; higher = QR dominates the composition.
-    controlnet_scale: float = 1.35
+    # Photo-dominant band: 1.05–1.20. Below 1.05 the QR usually doesn't decode;
+    # above 1.20 the grid pattern starts to dominate. With 5+ candidates, scan
+    # rate at 1.10 is high enough to reliably get a winner.
+    controlnet_scale: float = 1.10
     # Tile ControlNet stacked alongside QR Monster. 0 = off; 0.3-0.5 nudges
     # toward photo coherence at the cost of slightly weakened QR signal.
     tile_scale: float = 0.0

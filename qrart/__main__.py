@@ -23,9 +23,9 @@ def main() -> int:
         help="standalone (768x768), subject-portrait, scene-landscape, garment",
     )
     p.add_argument("--negative-prompt", default=None)
-    p.add_argument("--candidates", type=int, default=4)
+    p.add_argument("--candidates", type=int, default=5)
     p.add_argument("--steps", type=int, default=28)
-    p.add_argument("--scale", type=float, default=1.35, help="ControlNet conditioning scale")
+    p.add_argument("--scale", type=float, default=1.10, help="ControlNet conditioning scale (1.05-1.20 photo-dominant)")
     p.add_argument("--guidance", type=float, default=7.5)
     p.add_argument("--size", type=int, default=768)
     p.add_argument("--seed", type=int, default=None)

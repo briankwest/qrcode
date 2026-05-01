@@ -31,8 +31,15 @@ LCM_LORA_ID = "latent-consistency/lcm-lora-sdv1-5"
 MODELS = {
     # All SD 1.5 finetunes — same VAE + QR Monster ControlNet. Differences are
     # aesthetic: warm/cool palette, soft/sharp focus, photo-y vs stylized.
+    # Models ordered roughly by photo-dominance (top = strongest photo prior,
+    # most resistant to ControlNet override at low scales).
     "photoreal": "SG161222/Realistic_Vision_V6.0_B1_noVAE",
     "photoreal-v51": "SG161222/Realistic_Vision_V5.1_noVAE",
+    "majicmix": "digiplay/majicMIX_realistic_v6",
+    "epicphoto": "Yntec/epiCPhotoGasm",
+    "cyberrealistic": "Yntec/CyberRealistic",
+    "hyperrealism": "Yntec/HyperRealism",
+    "absolute-v18": "digiplay/AbsoluteReality_v1.8.1",
     "photon": "digiplay/Photon_v1",
     "epic": "emilianJR/epiCRealism",
     "absolute": "Lykon/AbsoluteReality",
