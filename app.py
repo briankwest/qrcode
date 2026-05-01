@@ -8,6 +8,7 @@ from typing import Any
 
 import asyncio
 import json as _json
+from dataclasses import replace as _replace
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, StreamingResponse
@@ -19,6 +20,15 @@ from qrart.db import get_db, new_job_id
 from qrart.generator import Progress
 from qrart.pipeline import MODELS, CancelledByUser
 from qrart.worker import Job, MAX_QUEUED, QueueFull, Worker
+
+# A2: auto-escalation tuning. When the user opts in (require_scan=True,
+# auto_escalate=True), all-fail jobs spawn a follow-up at scale +0.1, capped.
+# best-score floor avoids escalating on hopeless prompts where the QR will
+# never resolve regardless of scale (e.g. dark cosmic scenes that fight QR
+# luminance fundamentally).
+ESCALATE_STEP = 0.10
+ESCALATE_CAP = 1.50
+ESCALATE_MIN_SCORE = 0.70
 
 ROOT = Path(__file__).parent
 STATIC_DIR = ROOT / "static"
@@ -147,6 +157,10 @@ class GenerateBody(BaseModel):
     composition: str = "standalone"
     seed: int | None = None
     require_scan: bool = True
+    # A2: when require_scan is on and zero candidates pass, auto-resubmit with
+    # scale +0.1 (capped at 1.5) until one passes or we hit the cap. Off → user
+    # gets the failed result and can manually retry.
+    auto_escalate: bool = True
     fast_mode: bool = False
     hires_fix: bool = False
     hires_target: int = 1024
@@ -286,6 +300,69 @@ def _run_job(job: Job, cancelled: bool) -> None:
     )
     print(f"[worker] {job.job_id} done in {elapsed}s · scans={result.scans}", flush=True)
 
+    _maybe_escalate(job, result, db)
+
+
+def _maybe_escalate(job: Job, result, db) -> None:
+    """A2: when require_scan + auto_escalate are on and zero candidates scanned
+    but the best score is salvageable, enqueue a follow-up at scale +0.1.
+
+    The best-score floor avoids burning compute on hopeless prompts where
+    QR will never resolve at any scale (cosmic galaxies, plain skies, etc.).
+    """
+    if not job.body.get("require_scan"):
+        return
+    if not job.body.get("auto_escalate", True):
+        return
+    if result.scans:
+        return
+    # Don't escalate cancelled-mid-run results (the worker would have raised
+    # CancelledByUser, so we wouldn't reach here — but defensive).
+    if _worker.is_cancelled(job.job_id):
+        return
+
+    current_scale = float(job.request.controlnet_scale)
+    new_scale = round(current_scale + ESCALATE_STEP, 2)
+    if new_scale > ESCALATE_CAP:
+        db.insert_event(job.job_id, "escalation_skipped", {
+            "reason": f"already at cap ({ESCALATE_CAP})",
+            "scale": current_scale,
+        })
+        return
+
+    best_score = max(
+        (float(c.scannability) for c in result.candidates), default=0.0
+    )
+    if best_score < ESCALATE_MIN_SCORE:
+        db.insert_event(job.job_id, "escalation_skipped", {
+            "reason": f"best score {best_score:.2f} below floor {ESCALATE_MIN_SCORE}",
+            "scale": current_scale,
+        })
+        return
+
+    new_req = _replace(job.request, controlnet_scale=new_scale, seed=None)
+    new_body = {
+        **job.body,
+        "controlnet_scale": new_scale,
+        "seed": None,
+        "parent_job_id": job.job_id,
+    }
+    new_jid = new_job_id()
+    try:
+        db.insert_job(new_jid, new_body)
+        new_job = Job(job_id=new_jid, model=job.model, request=new_req, body=new_body)
+        _worker.enqueue(new_job)
+        db.insert_event(job.job_id, "auto_escalated", {
+            "child_job_id": new_jid,
+            "from_scale": current_scale,
+            "to_scale": new_scale,
+            "best_score": round(best_score, 3),
+        })
+        print(f"[escalate] {job.job_id} -> {new_jid} (scale {current_scale} -> {new_scale}, score {best_score:.2f})", flush=True)
+    except QueueFull:
+        db.finish_job(new_jid, status="failed", elapsed_s=0.0,
+                      error="queue full during auto-escalation")
+
 
 _worker = Worker(_run_job)
 
@@ -343,6 +420,7 @@ def generate(body: GenerateBody, request: Request) -> dict[str, Any]:
         composition=composition,
         seed=body.seed,
         require_scan=body.require_scan,
+        auto_escalate=body.auto_escalate,
         fast_mode=body.fast_mode,
         hires_fix=body.hires_fix,
         hires_target=max(768, min(body.hires_target, 1536)),
@@ -439,6 +517,7 @@ def rerun_job(
         composition=src["composition"],
         seed=src["seed"] if keep_seed else None,
         require_scan=bool(src["require_scan"]),
+        auto_escalate=bool(src.get("auto_escalate", 1)),
         fast_mode=bool(src["fast_mode"]),
         hires_fix=bool(src["hires_fix"]),
         hires_target=src["hires_target"],

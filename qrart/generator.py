@@ -70,6 +70,8 @@ class GenerationRequest:
     composition: str = "standalone"
     seed: int | None = None
     require_scan: bool = True
+    # A2: see app.GenerateBody. Persisted on the request so reruns inherit it.
+    auto_escalate: bool = True
     # Fast mode: swaps in LCM-LoRA + LCMScheduler. ~3–4x faster, slight fidelity drop.
     fast_mode: bool = False
     # Hi-res fix: upscale best candidate via Lanczos and run a low-strength

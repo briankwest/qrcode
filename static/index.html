@@ -448,6 +448,14 @@
 
     <div class="toggle-row">
       <div>
+        <div class="label">Auto-escalate</div>
+        <div class="desc">If 0 of N scan, retry at scale +0.1 (capped 1.5). Skips hopeless prompts.</div>
+      </div>
+      <div class="switch on" id="autoEscalateSwitch"></div>
+    </div>
+
+    <div class="toggle-row">
+      <div>
         <div class="label">Refine pass</div>
         <div class="desc">img2img polish — turns QR-textured output into a real photo</div>
       </div>
@@ -773,6 +781,11 @@
 
   // Fast mode: when on, the steps slider auto-jumps to 6 (LCM's sweet spot)
   // and the server overrides guidance/refine_steps server-side.
+  const autoEscSwitch = $("autoEscalateSwitch");
+  autoEscSwitch.addEventListener("click", () => {
+    autoEscSwitch.classList.toggle("on");
+  });
+
   const fastSwitch = $("fastSwitch");
   fastSwitch.addEventListener("click", () => {
     fastSwitch.classList.toggle("on");
@@ -946,6 +959,7 @@
       seed: seedVal === "" ? null : parseInt(seedVal, 10),
       refine: refine,
       refine_strength: parseFloat($("refineStrength").value),
+      auto_escalate: autoEscSwitch.classList.contains("on"),
       fast_mode: fast,
       hires_fix: hiresSwitch.classList.contains("on"),
       hires_target: parseInt($("hiresTarget").value, 10),
@@ -1076,6 +1090,19 @@
       loadHistory(false);
       loadPrompts();
       loadStats();
+    });
+    es.addEventListener("auto_escalated", (e) => {
+      const d = JSON.parse(e.data);
+      $("status").textContent =
+        `Auto-escalated to scale ${d.to_scale} (best score ${d.best_score}) · following job ${d.child_job_id}`;
+      // Switch the live stream to the child job. This keeps the user on the
+      // latest attempt without manual interaction.
+      teardownStream();
+      subscribeSSE(d.child_job_id);
+    });
+    es.addEventListener("escalation_skipped", (e) => {
+      const d = JSON.parse(e.data);
+      $("status").textContent = `Escalation skipped: ${d.reason}`;
     });
     es.addEventListener("failed", async (e) => {
       const d = JSON.parse(e.data);
@@ -1337,6 +1364,7 @@
 
     setSwitch("refineSwitch", !!j.refine);
     $("refineControls").style.display = j.refine ? "block" : "none";
+    setSwitch("autoEscalateSwitch", j.auto_escalate == null ? true : !!j.auto_escalate);
     setSwitch("fastSwitch", !!j.fast_mode);
     setSwitch("hiresSwitch", !!j.hires_fix);
     $("hiresControls").style.display = j.hires_fix ? "block" : "none";
