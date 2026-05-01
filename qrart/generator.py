@@ -7,6 +7,7 @@ from PIL import Image
 
 from .canvas import build_composition, composite_qr_into_scene, is_standalone
 from .pipeline import QRArtPipeline
+from .scannability import score as scannability_score
 from .scanner import scan
 from .styles import compose
 
@@ -93,6 +94,7 @@ class Candidate:
     decoded: str | None
     controlnet_scale: float
     refine_strength: float | None  # None when refine=False
+    scannability: float = 0.0       # 0.0-1.0, fraction of correctly-resolved QR modules
 
 
 @dataclass
@@ -109,6 +111,20 @@ class GenerationResult:
 
 def _refine_strengths(target: float) -> list[float]:
     return [target] if target <= 0.18 else [target, max(0.15, target - 0.1)]
+
+
+def _score_for(image: Image.Image, data: str, comp) -> float:
+    """Compute scannability against the QR region defined by comp."""
+    if is_standalone_comp(comp):
+        return scannability_score(image, data)
+    return scannability_score(
+        image, data, qr_pos=comp.qr_pos, qr_size=comp.qr_size,
+    )
+
+
+def is_standalone_comp(comp) -> bool:
+    """A standalone comp's qr_pos is (0,0) and qr_size matches canvas dims."""
+    return comp.qr_pos == (0, 0) and comp.qr_size == comp.canvas_w == comp.canvas_h
 
 
 class Generator:
@@ -150,12 +166,21 @@ class Generator:
                 decoded=cand.decoded,
                 controlnet_scale=cand.controlnet_scale,
                 refine_strength=cand.refine_strength,
+                scannability=cand.scannability,
             )
             candidates.append(cand)
 
-        # Best: scans first, then lowest controlnet_scale (= least visible QR).
+        # Best: scans first, then highest scannability score, then lowest
+        # controlnet_scale (= least visible QR). Score breaks ties when
+        # multiple candidates scan, and when none scan it picks the closest
+        # one — which the C1 refine pass nudges over the threshold.
         best = sorted(
-            candidates, key=lambda c: (0 if c.scans else 1, c.controlnet_scale)
+            candidates,
+            key=lambda c: (
+                0 if c.scans else 1,
+                -c.scannability,
+                c.controlnet_scale,
+            ),
         )[0]
         best_idx = candidates.index(best)
 
@@ -200,6 +225,7 @@ class Generator:
                 decoded=decoded,
                 controlnet_scale=best.controlnet_scale,
                 refine_strength=best.refine_strength,
+                scannability=_score_for(final, req.data, comp),
             )
             candidates[best_idx] = best
 
@@ -277,6 +303,7 @@ class Generator:
                 decoded=decoded,
                 controlnet_scale=req.controlnet_scale,
                 refine_strength=None,
+                scannability=_score_for(final, req.data, comp),
             )
 
         # Refine the QR art (not the composite — scene doesn't need it). Try
@@ -310,6 +337,7 @@ class Generator:
                 decoded=decoded,
                 controlnet_scale=req.controlnet_scale,
                 refine_strength=strength,
+                scannability=_score_for(final, req.data, comp),
             )
             if ok:
                 return cand

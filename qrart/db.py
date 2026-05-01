@@ -206,6 +206,7 @@ class Database:
         decoded: str | None,
         image_path: str,
         pass1_image_path: str | None,
+        scannability: float | None = None,
     ) -> str:
         cid = new_candidate_id()
         with self._write_lock:
@@ -213,12 +214,13 @@ class Database:
                 """
                 INSERT INTO candidates
                 (id, job_id, idx, seed, controlnet_scale, refine_strength,
-                 scans, decoded, image_path, pass1_image_path)
-                VALUES (?,?,?,?,?,?,?,?,?,?)
+                 scans, decoded, image_path, pass1_image_path, scannability)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     cid, job_id, idx, seed, controlnet_scale, refine_strength,
                     int(bool(scans)), decoded, image_path, pass1_image_path,
+                    scannability,
                 ),
             )
         return cid

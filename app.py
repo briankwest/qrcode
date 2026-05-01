@@ -258,6 +258,7 @@ def _run_job(job: Job, cancelled: bool) -> None:
             decoded=c.decoded,
             image_path=f"/outputs/{job.job_id}/cand{i}.png",
             pass1_image_path=pass1_url,
+            scannability=c.scannability,
         )
         candidate_ids.append(cid)
 

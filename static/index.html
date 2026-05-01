@@ -900,8 +900,14 @@
     const refineChip = c.refine_strength != null
       ? `<span class="chip">refine ${c.refine_strength}</span>`
       : `<span class="chip">no refine</span>`;
+    const sc = (c.scannability == null) ? null : Number(c.scannability);
+    const scoreCls = sc == null ? "" : (sc >= 0.92 ? "good" : (sc >= 0.85 ? "" : "bad"));
+    const scoreChip = sc == null
+      ? ""
+      : `<span class="chip ${scoreCls}" title="Per-module luminance match against the ground-truth QR">score ${(sc * 100).toFixed(0)}%</span>`;
     $("meta").innerHTML = `
       <span class="chip ${c.scans ? "good" : "bad"}">${c.scans ? "✓ scans" : "✗ does not scan"}</span>
+      ${scoreChip}
       <span class="chip">seed ${c.seed}</span>
       <span class="chip">scale ${c.controlnet_scale}</span>
       ${refineChip}
@@ -1120,6 +1126,7 @@
       decoded: c.decoded,
       controlnet_scale: c.controlnet_scale,
       refine_strength: c.refine_strength,
+      scannability: c.scannability,
     }));
     const bestIndex = cands.findIndex((c) => c.id === j.best_candidate_id);
     setQrPreview(j.qr_image_path);
