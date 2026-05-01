@@ -18,14 +18,26 @@ def _build(data: str, border: int = 1) -> qrcode.QRCode:
     return qr
 
 
-def make_qr(data: str, size: int = 768, border: int = 1) -> Image.Image:
+def make_qr(
+    data: str,
+    size: int = 768,
+    border: int = 1,
+    light_color: str = "white",
+    dark_color: str = "black",
+) -> Image.Image:
     """Render a high-error-correction QR as a square PIL image at exactly `size` px.
 
     Level H gives ~30% error correction headroom — that's the slack the diffusion
     model uses to "lie" about pixels while keeping the code scannable.
+
+    For QR Monster v2, render the *control image* with light_color="#808080":
+    v2 was trained with gray non-data regions, and feeding gray instead of
+    white lets the diffusion paint darker photo content into light-module
+    areas without contradicting the controlnet signal. Improves how
+    naturally the QR integrates with photoreal scenes.
     """
     qr = _build(data, border=border)
-    img = qr.make_image(fill_color="black", back_color="white").convert("RGB")
+    img = qr.make_image(fill_color=dark_color, back_color=light_color).convert("RGB")
     return img.resize((size, size), Image.NEAREST)
 
 

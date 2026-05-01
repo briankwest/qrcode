@@ -147,7 +147,7 @@ class Generator:
     ) -> GenerationResult:
         # Composition scaffold goes in BEFORE style preset so the style suffix
         # (RAW photo, 8k, etc.) lands at the very end where SD weighs it most.
-        comp = build_composition(req.data, req.composition)
+        comp = build_composition(req.data, req.composition, req.qr_monster_version)
         full_prompt = req.prompt + comp.scaffold
         prompt, negative = compose(full_prompt, req.style, req.negative_prompt)
 
