@@ -153,7 +153,7 @@ def _finder_aware_mask(qsz: int, feather_px: int) -> Image.Image:
     return alpha
 
 
-def _reinforce_finders(
+def reinforce_finders(
     image: Image.Image,
     data: str,
     qr_pos: tuple[int, int],
@@ -247,7 +247,7 @@ def composite_qr_into_scene(
     composition: str,
     feather_px: int = 4,
     data: str | None = None,
-    reinforce_finders: bool = True,
+    reinforce_finders_flag: bool = True,
     quiet_zone_px: int = QUIET_ZONE_PX,
 ) -> Image.Image:
     """Paste qr_art into scene at the composition's QR position with a
@@ -277,7 +277,7 @@ def composite_qr_into_scene(
     qr_resized = padded.resize((qsz, qsz)).convert("RGB")
     out.paste(qr_resized, (qx, qy), _finder_aware_mask(qsz, feather_px))
 
-    if reinforce_finders and data is not None:
-        out = _reinforce_finders(out, data, (qx, qy), qsz)
+    if reinforce_finders_flag and data is not None:
+        out = reinforce_finders(out, data, (qx, qy), qsz)
 
     return out

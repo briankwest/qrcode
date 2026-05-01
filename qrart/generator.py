@@ -5,7 +5,12 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 from PIL import Image
 
-from .canvas import build_composition, composite_qr_into_scene, is_standalone
+from .canvas import (
+    build_composition,
+    composite_qr_into_scene,
+    is_standalone,
+    reinforce_finders,
+)
 from .pipeline import QRArtPipeline
 from .scannability import score as scannability_score
 from .scanner import scan
@@ -343,7 +348,14 @@ class Generator:
 
         def composite(qr_art: Image.Image) -> Image.Image:
             if scene is None:
-                return qr_art
+                # Standalone: no scene to paste into, but still reinforce
+                # the three finder corners over the diffusion output. Without
+                # this, sparse-content prompts (snow leopards on snow, cosmic
+                # galaxies, etc.) leave the corners as flat photo content
+                # with no QR pattern, and scanners can't locate the code.
+                return reinforce_finders(
+                    qr_art, req.data, (0, 0), qr_art.width,
+                )
             return composite_qr_into_scene(
                 scene, qr_art, req.composition, data=req.data,
             )
