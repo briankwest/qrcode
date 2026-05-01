@@ -14,8 +14,17 @@ from diffusers import (
 from PIL import Image
 from typing import Callable
 
-# QR Monster v1 — trained for hiding QR codes inside generated images.
-CONTROLNET_ID = "monster-labs/control_v1p_sd15_qrcode_monster"
+import os as _os
+
+# QR Monster ControlNet — trained for hiding QR codes inside generated images.
+# The repo ships both v1 (root) and v2 (subfolder). v1 is the default; v2
+# tends to produce slightly stronger QR signal at the same scale slider, so
+# at v2 you can run scale ~0.95-1.05 for the same scan rate that v1 needs
+# 1.10-1.20 for. Toggle with `QRART_MONSTER_VERSION=v2`.
+_MONSTER_REPO = "monster-labs/control_v1p_sd15_qrcode_monster"
+QR_MONSTER_VERSION = _os.environ.get("QRART_MONSTER_VERSION", "v1").lower()
+CONTROLNET_ID = _MONSTER_REPO
+CONTROLNET_SUBFOLDER = "v2" if QR_MONSTER_VERSION == "v2" else None
 
 # Tile ControlNet — when stacked alongside QR Monster, it adds a coherence /
 # detail-preservation signal that pushes outputs toward photo (less QR-noisy)
@@ -138,7 +147,10 @@ class QRArtPipeline:
     def load(self) -> None:
         if self._pipe is not None:
             return
-        qr_controlnet = ControlNetModel.from_pretrained(CONTROLNET_ID, torch_dtype=self.dtype)
+        qr_kwargs: dict = {"torch_dtype": self.dtype}
+        if CONTROLNET_SUBFOLDER:
+            qr_kwargs["subfolder"] = CONTROLNET_SUBFOLDER
+        qr_controlnet = ControlNetModel.from_pretrained(CONTROLNET_ID, **qr_kwargs)
         tile_controlnet = ControlNetModel.from_pretrained(CONTROLNET_TILE_ID, torch_dtype=self.dtype)
         # Multi-ControlNet: QR Monster does the heavy lifting, Tile rides along
         # at low scale to bias toward coherent photo structure.

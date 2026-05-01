@@ -18,7 +18,7 @@ from pydantic import BaseModel, Field
 from qrart import COMPOSITIONS, Generator, GenerationRequest, STYLE_PRESETS
 from qrart.db import get_db, new_job_id
 from qrart.generator import Progress
-from qrart.pipeline import MODELS, CancelledByUser
+from qrart.pipeline import MODELS, QR_MONSTER_VERSION, CancelledByUser
 from qrart.worker import Job, MAX_QUEUED, QueueFull, Worker
 
 # A2: auto-escalation tuning. When the user opts in (require_scan=True,
@@ -188,6 +188,7 @@ def health() -> dict[str, Any]:
         "device": g.pipeline.device,
         "loaded": g.pipeline._pipe is not None,
         "base_model": g.pipeline.base_model,
+        "qr_monster_version": QR_MONSTER_VERSION,
         "styles": list(STYLE_PRESETS.keys()),
         "compositions": list(COMPOSITIONS.keys()),
         "models": list(MODELS.keys()),
