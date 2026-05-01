@@ -290,7 +290,9 @@ class Generator:
         def composite(qr_art: Image.Image) -> Image.Image:
             if scene is None:
                 return qr_art
-            return composite_qr_into_scene(scene, qr_art, req.composition)
+            return composite_qr_into_scene(
+                scene, qr_art, req.composition, data=req.data,
+            )
 
         if not req.refine:
             final = composite(qr_pass1)
