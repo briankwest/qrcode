@@ -793,6 +793,17 @@
     autoEscSwitch.classList.toggle("on");
   });
 
+  // QR Monster v1 vs v2 have different scale sweet spots. v2 is a stronger
+  // conditioner — its sweet spot is ~0.95-1.05; v1 wants ~1.10-1.20. When
+  // the user toggles versions, nudge the slider toward the corresponding
+  // sweet-spot midpoint so they aren't stuck on the wrong value.
+  const QR_MONSTER_DEFAULT_SCALES = { v1: 1.10, v2: 0.95 };
+  $("qrMonsterVersion").addEventListener("change", () => {
+    const version = $("qrMonsterVersion").value;
+    const target = QR_MONSTER_DEFAULT_SCALES[version];
+    if (target != null) setSlider("scale", target);
+  });
+
   const fastSwitch = $("fastSwitch");
   fastSwitch.addEventListener("click", () => {
     fastSwitch.classList.toggle("on");

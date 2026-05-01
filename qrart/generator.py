@@ -347,29 +347,29 @@ class Generator:
             )
 
         def composite(qr_art: Image.Image) -> Image.Image:
+            """Build the un-reinforced final image. Standalone returns the
+            raw QR art; compositions paste it into the scene with the
+            finder-aware mask + quiet-zone pad but WITHOUT pasting the
+            ground-truth finder squares on top — that's the rescue path."""
             if scene is None:
-                # Standalone: no scene to paste into. Compositions get
-                # finder reinforcement built into composite_qr_into_scene,
-                # but for standalone we apply it conditionally below as a
-                # rescue — pasting the corner patterns onto a clean
-                # photo always would just slap visible squares onto subject
-                # content even when the QR scanned fine without them.
                 return qr_art
             return composite_qr_into_scene(
                 scene, qr_art, req.composition, data=req.data,
+                reinforce_finders_flag=False,
             )
 
         def composite_and_scan(qr_art: Image.Image) -> tuple[Image.Image, str | None]:
-            """Composite, scan, and apply standalone finder reinforcement
-            as a rescue if the un-reinforced result didn't decode.
-            Compositions skip the rescue path — they're already reinforced
-            inside composite_qr_into_scene.
+            """Composite, scan, and rescue with finder reinforcement when
+            needed. Uniform behavior for standalone and compositions: try
+            the diffusion's natural output first; only paste corner squares
+            if it didn't scan. This keeps v2's clean diffusion-native
+            corners intact while still rescuing v1's looser outputs.
             """
             final = composite(qr_art)
             decoded = scan(final)
-            if decoded != req.data and scene is None:
+            if decoded != req.data:
                 rescued = reinforce_finders(
-                    final, req.data, (0, 0), final.width,
+                    final, req.data, comp.qr_pos, comp.qr_size,
                 )
                 rescued_decoded = scan(rescued)
                 if rescued_decoded == req.data:
