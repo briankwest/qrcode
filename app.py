@@ -2,16 +2,17 @@ from __future__ import annotations
 
 import threading
 import time
-import uuid
+import traceback
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from qrart import COMPOSITIONS, Generator, GenerationRequest, STYLE_PRESETS
+from qrart.db import get_db, new_job_id
 from qrart.pipeline import MODELS
 
 ROOT = Path(__file__).parent
@@ -22,6 +23,13 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 app = FastAPI(title="QR Art Studio")
 app.mount("/outputs", StaticFiles(directory=OUTPUT_DIR), name="outputs")
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+
+@app.on_event("startup")
+def _startup() -> None:
+    # Initialize SQLite + run migrations + mark orphans before the first
+    # request arrives. Runs once per process.
+    get_db()
 
 # One Generator per model, lazily created on first use. Models that haven't
 # been used in this session don't consume memory. Switching back to a model
@@ -68,6 +76,10 @@ class GenerateBody(BaseModel):
     hires_strength: float = 0.20
     adetailer: bool = False
     adetailer_strength: float = 0.35
+    # Phase 1: link a remix back to the source job. When the UI loads a past
+    # job's settings into the form and the user resubmits, it sets this so the
+    # history can show "remixed from <id>" lineage.
+    parent_job_id: str | None = None
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -113,7 +125,7 @@ def warm(body: WarmBody | None = None) -> dict[str, Any]:
 
 
 @app.post("/api/generate")
-def generate(body: GenerateBody) -> dict[str, Any]:
+def generate(body: GenerateBody, request: Request) -> dict[str, Any]:
     if not body.data.strip() or not body.prompt.strip():
         raise HTTPException(400, "data and prompt are required")
 
@@ -179,28 +191,81 @@ def generate(body: GenerateBody) -> dict[str, Any]:
             503,
             "Generation already in progress. Wait for the current request to finish, then retry.",
         )
+
+    db = get_db()
+    job_id = new_job_id()
+
+    # Snapshot the values we'll actually run with (post-clamp, post-fast-mode
+    # override) so the DB row reflects what diffused, not the raw request.
+    persisted = {
+        **body.model_dump(),
+        "candidates": req.candidates,
+        "steps": req.steps,
+        "controlnet_scale": req.controlnet_scale,
+        "tile_scale": req.tile_scale,
+        "guidance": req.guidance,
+        "refine_strength": req.refine_strength,
+        "refine_steps": req.refine_steps,
+        "hires_target": req.hires_target,
+        "hires_strength": req.hires_strength,
+        "adetailer_strength": req.adetailer_strength,
+        "composition": composition,
+        "client_ip": request.client.host if request.client else None,
+        "user_agent": request.headers.get("user-agent"),
+    }
+    db.insert_job(job_id, persisted)
+    db.touch_prompt(body.prompt)
+
+    t0 = time.time()
     try:
-        t0 = time.time()
         with _active_lock:
             _active["model"] = body.model
             _active["started_at"] = t0
         result = get_generator(body.model).generate(req)
         elapsed = round(time.time() - t0, 2)
+    except Exception as e:
+        elapsed = round(time.time() - t0, 2)
+        db.finish_job(
+            job_id,
+            status="failed",
+            elapsed_s=elapsed,
+            error=f"{e}\n\n{traceback.format_exc()}",
+        )
+        raise HTTPException(500, f"Generation failed: {e}")
     finally:
         with _active_lock:
             _active["model"] = None
             _active["started_at"] = None
         _run_lock.release()
 
-    job_id = uuid.uuid4().hex[:12]
     job_dir = OUTPUT_DIR / job_id
     job_dir.mkdir(parents=True, exist_ok=True)
 
     saved: list[dict[str, Any]] = []
+    candidate_ids: list[str] = []
     for i, c in enumerate(result.candidates):
         path = job_dir / f"cand{i}.png"
         c.image.save(path)
+        pass1_path: Path | None = None
+        if c.pass1_image is not None:
+            pass1_path = job_dir / f"cand{i}.pass1.png"
+            c.pass1_image.save(pass1_path)
+        cid = db.insert_candidate(
+            job_id=job_id,
+            idx=i,
+            seed=c.seed,
+            controlnet_scale=c.controlnet_scale,
+            refine_strength=c.refine_strength,
+            scans=c.scans,
+            decoded=c.decoded,
+            image_path=f"/outputs/{job_id}/cand{i}.png",
+            pass1_image_path=(
+                f"/outputs/{job_id}/cand{i}.pass1.png" if pass1_path else None
+            ),
+        )
+        candidate_ids.append(cid)
         entry: dict[str, Any] = {
+            "id": cid,
             "index": i,
             "url": f"/outputs/{job_id}/cand{i}.png",
             "seed": c.seed,
@@ -211,9 +276,7 @@ def generate(body: GenerateBody) -> dict[str, Any]:
                 round(c.refine_strength, 3) if c.refine_strength is not None else None
             ),
         }
-        if c.pass1_image is not None:
-            pass1_path = job_dir / f"cand{i}.pass1.png"
-            c.pass1_image.save(pass1_path)
+        if pass1_path is not None:
             entry["pass1_url"] = f"/outputs/{job_id}/cand{i}.pass1.png"
         saved.append(entry)
 
@@ -224,6 +287,16 @@ def generate(body: GenerateBody) -> dict[str, Any]:
         (i for i, c in enumerate(result.candidates) if c.image is result.image),
         0,
     )
+    db.finish_job(
+        job_id,
+        status="completed",
+        elapsed_s=elapsed,
+        scans=result.scans,
+        decoded=result.decoded,
+        qr_image_path=f"/outputs/{job_id}/qr.png",
+        best_candidate_id=candidate_ids[best_idx] if candidate_ids else None,
+    )
+
     return {
         "job_id": job_id,
         "elapsed_s": elapsed,
@@ -233,6 +306,40 @@ def generate(body: GenerateBody) -> dict[str, Any]:
         "qr_url": f"/outputs/{job_id}/qr.png",
         "candidates": saved,
     }
+
+
+@app.get("/api/jobs")
+def list_jobs(
+    limit: int = 50,
+    offset: int = 0,
+    status: str | None = None,
+    model: str | None = None,
+    scans: bool | None = None,
+    q: str | None = None,
+) -> dict[str, Any]:
+    """Browse history. Filters: status, model, scans (bool), q (substring of
+    prompt or decoded)."""
+    db = get_db()
+    rows = db.list_jobs(
+        limit=max(1, min(limit, 200)),
+        offset=max(0, offset),
+        status=status,
+        model=model,
+        scans=scans,
+        q=q,
+    )
+    return {"jobs": rows, "count": len(rows)}
+
+
+@app.get("/api/jobs/{job_id}")
+def get_job(job_id: str) -> dict[str, Any]:
+    """Full job row + candidates. URL paths in the response point at the
+    /outputs static mount so the UI can render them directly."""
+    db = get_db()
+    job = db.get_job(job_id)
+    if not job:
+        raise HTTPException(404, f"job {job_id} not found")
+    return job
 
 
 if __name__ == "__main__":
