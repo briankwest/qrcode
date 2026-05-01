@@ -88,10 +88,17 @@ class Worker:
             return len(self._queued_ids)
 
     def cancel(self, job_id: str) -> str:
-        """Returns 'queued' (cancelled before run), 'running' (can't kill yet),
-        or 'unknown' (not in flight)."""
+        """Flag a job for cancellation.
+
+        Returns:
+          'queued'  — was queued; will be skipped on dequeue.
+          'running' — currently running; the diffusion step callback will
+                      raise CancelledByUser at the next step boundary.
+          'unknown' — not in flight (already finished or never enqueued).
+        """
         with self._state_lock:
             if self._active is not None and self._active.job_id == job_id:
+                self._cancelled.add(job_id)
                 return "running"
             if job_id in self._queued_ids:
                 self._cancelled.add(job_id)
@@ -142,3 +149,6 @@ class Worker:
             finally:
                 with self._state_lock:
                     self._active = None
+                    # Clear stale cancel flag (mid-run cancellation already
+                    # consumed by the step callback raising CancelledByUser).
+                    self._cancelled.discard(job.job_id)

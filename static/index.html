@@ -415,7 +415,17 @@
     </div>
 
     <button class="primary" id="go">Generate</button>
+    <button id="cancelBtn" style="width:100%;margin-top:8px;background:#1a1a20;color:var(--bad);border:1px solid #3a1f1f;padding:10px 14px;border-radius:8px;font-size:13px;cursor:pointer;display:none;">Cancel</button>
     <div class="footer-note" id="status">Idle.</div>
+    <div id="progress" style="margin-top:10px;display:none;">
+      <div style="display:flex;justify-content:space-between;font-family:ui-monospace,Menlo,monospace;font-size:11px;color:var(--muted);margin-bottom:4px;">
+        <span id="progLabel">…</span>
+        <span id="progDetail">–</span>
+      </div>
+      <div style="height:6px;background:var(--panel-2);border:1px solid var(--border);border-radius:999px;overflow:hidden;">
+        <div id="progBar" style="height:100%;width:0%;background:linear-gradient(90deg,var(--accent),var(--accent-2));transition:width 0.2s;"></div>
+      </div>
+    </div>
   </section>
 
   <section class="stage">
@@ -854,8 +864,11 @@
       const ack = await r.json();
       currentJobId = ack.job_id;
       $("status").textContent = `Queued · position ${ack.queue_position} · job ${ack.job_id}`;
+      $("cancelBtn").style.display = "block";
+      $("progress").style.display = "block";
+      setProgress("queued", "waiting", 0);
       refreshHealth();
-      pollJob(ack.job_id);
+      subscribeSSE(ack.job_id);
     } catch (e) {
       prev.innerHTML = `<div class="placeholder"><strong>Error</strong>${e.message}</div>`;
       $("status").textContent = "Failed.";
@@ -863,57 +876,118 @@
     }
   });
 
-  // ── Async polling ────────────────────────────────────────────────────────
-  // The Generate button now enqueues; the worker runs in the background. We
-  // poll /api/jobs/{id} every 2s until status leaves queued/running, then
-  // render the results from the DB row (URLs are already web-rooted).
-  let currentJobId = null;
-  let pollTimer = null;
-
-  function stopPolling() {
-    if (pollTimer) {
-      clearTimeout(pollTimer);
-      pollTimer = null;
+  $("cancelBtn").addEventListener("click", async () => {
+    if (!currentJobId) return;
+    $("cancelBtn").disabled = true;
+    try {
+      const r = await fetch(`/api/jobs/${currentJobId}`, { method: "DELETE" });
+      const j = await r.json();
+      $("status").textContent = j.cancelled
+        ? `Cancelling ${currentJobId}…`
+        : `Cancel ignored — job is ${j.reason}.`;
+    } catch (e) {
+      $("status").textContent = `Cancel failed: ${e.message}`;
+    } finally {
+      $("cancelBtn").disabled = false;
     }
+  });
+
+  // ── Live job stream (SSE) ────────────────────────────────────────────────
+  // Phase 3: Generate enqueues; we subscribe to /api/jobs/{id}/stream and
+  // render step events as a live progress bar. Falls back to a /api/jobs/{id}
+  // fetch only at terminal events.
+  let currentJobId = null;
+  let currentES = null;
+  let candidateScanState = {};   // idx -> bool (for the live gallery feel)
+
+  function setProgress(label, detail, frac) {
+    $("progLabel").textContent = label;
+    $("progDetail").textContent = detail;
+    $("progBar").style.width = `${Math.min(100, Math.max(0, frac * 100)).toFixed(1)}%`;
   }
 
-  async function pollJob(jobId) {
-    stopPolling();
-    try {
-      const r = await fetch(`/api/jobs/${jobId}`);
-      if (!r.ok) throw new Error(`fetch ${jobId} failed: ${r.status}`);
-      const j = await r.json();
-      const status = j.status;
-      if (status === "queued") {
-        $("status").textContent = `Queued · job ${jobId}`;
-      } else if (status === "running") {
-        const elapsed = j.started_at
-          ? Math.round((Date.now() - new Date(j.started_at + "Z").getTime()) / 1000)
-          : "?";
-        $("status").textContent = `Running · ${elapsed}s · job ${jobId}`;
-      } else if (status === "completed") {
-        renderJob(j);
-        $("go").disabled = false;
-        refreshHealth();
-        return;
-      } else if (status === "failed") {
-        $("preview").innerHTML = `<div class="placeholder"><strong>Failed</strong>${(j.error || "").split("\n")[0]}</div>`;
-        $("status").textContent = `Failed · job ${jobId}`;
-        $("go").disabled = false;
-        refreshHealth();
-        return;
-      } else if (status === "cancelled") {
-        $("preview").innerHTML = `<div class="placeholder"><strong>Cancelled</strong></div>`;
-        $("status").textContent = `Cancelled · job ${jobId}`;
-        $("go").disabled = false;
-        refreshHealth();
-        return;
-      }
-    } catch (e) {
-      $("status").textContent = `Poll error: ${e.message}`;
+  function teardownStream() {
+    if (currentES) {
+      currentES.close();
+      currentES = null;
     }
-    pollTimer = setTimeout(() => pollJob(jobId), 2000);
-    refreshHealth();
+    $("cancelBtn").style.display = "none";
+    setTimeout(() => { $("progress").style.display = "none"; }, 800);
+  }
+
+  function subscribeSSE(jobId) {
+    if (currentES) currentES.close();
+    candidateScanState = {};
+    const es = new EventSource(`/api/jobs/${jobId}/stream`);
+    currentES = es;
+
+    es.addEventListener("started", (e) => {
+      const d = JSON.parse(e.data);
+      $("status").textContent = `Started · model ${d.model} · job ${jobId}`;
+      setProgress("starting", d.model || "", 0);
+    });
+    es.addEventListener("phase", (e) => {
+      const d = JSON.parse(e.data);
+      const cand = (d.candidate ?? 0) + 1;
+      $("status").textContent = `Phase ${d.phase} · candidate ${cand} · job ${jobId}`;
+    });
+    es.addEventListener("step", (e) => {
+      const d = JSON.parse(e.data);
+      const candIdx = (d.candidate ?? 0) + 1;
+      const total = d.total_candidates ?? 1;
+      const frac = (d.step / d.total_steps);
+      setProgress(
+        `${d.phase} · candidate ${candIdx}/${total}`,
+        `step ${d.step}/${d.total_steps}`,
+        frac,
+      );
+    });
+    es.addEventListener("candidate_started", (e) => {
+      const d = JSON.parse(e.data);
+      $("status").textContent = `Candidate ${d.idx + 1} starting (seed ${d.seed}) · job ${jobId}`;
+    });
+    es.addEventListener("candidate_done", (e) => {
+      const d = JSON.parse(e.data);
+      candidateScanState[d.idx] = !!d.scans;
+      $("status").textContent =
+        `Candidate ${d.idx + 1} ${d.scans ? "✓ scans" : "✗ does not scan"} · job ${jobId}`;
+    });
+    es.addEventListener("completed", async () => {
+      const r = await fetch(`/api/jobs/${jobId}`);
+      const j = await r.json();
+      renderJob(j);
+      $("go").disabled = false;
+      teardownStream();
+      refreshHealth();
+    });
+    es.addEventListener("failed", async (e) => {
+      const d = JSON.parse(e.data);
+      $("preview").innerHTML =
+        `<div class="placeholder"><strong>Failed</strong>${(d.error || "").split("\n")[0]}</div>`;
+      $("status").textContent = `Failed · job ${jobId}`;
+      $("go").disabled = false;
+      teardownStream();
+      refreshHealth();
+    });
+    es.addEventListener("cancelled", () => {
+      $("preview").innerHTML = `<div class="placeholder"><strong>Cancelled</strong></div>`;
+      $("status").textContent = `Cancelled · job ${jobId}`;
+      $("go").disabled = false;
+      teardownStream();
+      refreshHealth();
+    });
+    es.onerror = () => {
+      // Network blip — try a one-shot fallback fetch in case we missed the
+      // terminal event. If still queued/running, the EventSource will reconnect.
+      fetch(`/api/jobs/${jobId}`).then((r) => r.json()).then((j) => {
+        if (["completed", "failed", "cancelled"].includes(j.status)) {
+          if (j.status === "completed") renderJob(j);
+          $("go").disabled = false;
+          teardownStream();
+          refreshHealth();
+        }
+      });
+    };
   }
 
   function renderJob(j) {

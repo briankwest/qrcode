@@ -228,6 +228,20 @@ class Database:
                 (job_id, _now(), event_type, json.dumps(payload)),
             )
 
+    def events_since(self, job_id: str, after_id: int = 0, limit: int = 200) -> list[dict[str, Any]]:
+        """Fetch events with id > after_id for a job, oldest first. SSE handler
+        polls this every ~250 ms with the last event id it saw."""
+        rows = self.conn.execute(
+            "SELECT id, ts, type, payload FROM job_events"
+            " WHERE job_id = ? AND id > ?"
+            " ORDER BY id ASC LIMIT ?",
+            (job_id, after_id, limit),
+        ).fetchall()
+        return [
+            {"id": r["id"], "ts": r["ts"], "type": r["type"], "payload": json.loads(r["payload"])}
+            for r in rows
+        ]
+
     # ── Prompts (used by phase 5 picker) ─────────────────────────────────────
     def touch_prompt(self, text: str) -> None:
         if not text or not text.strip():

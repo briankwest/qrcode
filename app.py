@@ -6,14 +6,18 @@ import traceback
 from pathlib import Path
 from typing import Any
 
+import asyncio
+import json as _json
+
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from qrart import COMPOSITIONS, Generator, GenerationRequest, STYLE_PRESETS
 from qrart.db import get_db, new_job_id
-from qrart.pipeline import MODELS
+from qrart.generator import Progress
+from qrart.pipeline import MODELS, CancelledByUser
 from qrart.worker import Job, MAX_QUEUED, QueueFull, Worker
 
 ROOT = Path(__file__).parent
@@ -133,8 +137,21 @@ def _run_job(job: Job, cancelled: bool) -> None:
 
     db.mark_running(job.job_id)
     t0 = time.time()
+
+    progress = Progress(
+        publish=lambda type_, payload: db.insert_event(job.job_id, type_, payload),
+        is_cancelled=lambda: _worker.is_cancelled(job.job_id),
+    )
+    progress.emit("started", model=job.model)
+
     try:
-        result = get_generator(job.model).generate(job.request)
+        result = get_generator(job.model).generate(job.request, progress=progress)
+    except CancelledByUser:
+        elapsed = round(time.time() - t0, 2)
+        db.finish_job(job.job_id, status="cancelled", elapsed_s=elapsed)
+        progress.emit("cancelled")
+        print(f"[worker] {job.job_id} CANCELLED after {elapsed}s", flush=True)
+        return
     except Exception as e:
         elapsed = round(time.time() - t0, 2)
         db.finish_job(
@@ -143,6 +160,7 @@ def _run_job(job: Job, cancelled: bool) -> None:
             elapsed_s=elapsed,
             error=f"{e}\n\n{traceback.format_exc()}",
         )
+        progress.emit("failed", error=str(e))
         print(f"[worker] {job.job_id} FAILED: {e}", flush=True)
         return
 
@@ -185,6 +203,13 @@ def _run_job(job: Job, cancelled: bool) -> None:
         scans=result.scans,
         decoded=result.decoded,
         qr_image_path=f"/outputs/{job.job_id}/qr.png",
+        best_candidate_id=candidate_ids[best_idx] if candidate_ids else None,
+    )
+    progress.emit(
+        "completed",
+        elapsed_s=elapsed,
+        scans=result.scans,
+        decoded=result.decoded,
         best_candidate_id=candidate_ids[best_idx] if candidate_ids else None,
     )
     print(f"[worker] {job.job_id} done in {elapsed}s · scans={result.scans}", flush=True)
@@ -305,22 +330,60 @@ def generate(body: GenerateBody, request: Request) -> dict[str, Any]:
 
 @app.delete("/api/jobs/{job_id}")
 def cancel_job(job_id: str) -> dict[str, Any]:
-    """Cancel a queued job. Cannot kill a running job in phase 2 — that
-    requires the diffusion-step callback hook (phase 3)."""
+    """Cancel a job. If queued, it'll be skipped on dequeue. If running, the
+    diffusion step callback raises CancelledByUser at the next step boundary
+    and the worker writes status='cancelled'.
+    """
     db = get_db()
     job = db.get_job(job_id)
     if not job:
         raise HTTPException(404, f"job {job_id} not found")
     state = _worker.cancel(job_id)
-    if state == "queued":
-        return {"job_id": job_id, "cancelled": True}
-    if state == "running":
-        raise HTTPException(
-            409,
-            "Job is already running; mid-diffusion cancel ships in phase 3.",
-        )
-    # 'unknown' — not in flight; either finished, failed, or never enqueued.
+    if state in ("queued", "running"):
+        return {"job_id": job_id, "cancelled": True, "was": state}
     return {"job_id": job_id, "cancelled": False, "reason": job["status"]}
+
+
+@app.get("/api/jobs/{job_id}/stream")
+async def job_stream(job_id: str, request: Request) -> StreamingResponse:
+    """SSE feed of job_events. The worker writes events into SQLite as the
+    pipeline ticks; this handler polls the table at ~250 ms and forwards each
+    new row as a server-sent event. Stream closes after a terminal event
+    (completed/failed/cancelled) or when the client disconnects.
+    """
+    db = get_db()
+    job = db.get_job(job_id)
+    if not job:
+        raise HTTPException(404, f"job {job_id} not found")
+
+    async def gen():
+        last_id = 0
+        terminal = {"completed", "failed", "cancelled"}
+        # Replay any events already on disk (e.g. UI reconnects mid-job).
+        seen_terminal = False
+        while not seen_terminal:
+            if await request.is_disconnected():
+                return
+            events = db.events_since(job_id, after_id=last_id, limit=200)
+            for ev in events:
+                last_id = ev["id"]
+                payload = {**ev["payload"], "ts": ev["ts"]}
+                yield f"event: {ev['type']}\ndata: {_json.dumps(payload)}\n\n"
+                if ev["type"] in terminal:
+                    seen_terminal = True
+                    break
+            if seen_terminal:
+                break
+            # Also short-circuit if the DB row says the job is already done
+            # (e.g. completed before the SSE handler attached).
+            row = db.get_job(job_id)
+            if row and row["status"] in terminal and not events:
+                yield f"event: {row['status']}\ndata: {_json.dumps({'status': row['status']})}\n\n"
+                seen_terminal = True
+                break
+            await asyncio.sleep(0.25)
+
+    return StreamingResponse(gen(), media_type="text/event-stream")
 
 
 @app.get("/api/jobs")

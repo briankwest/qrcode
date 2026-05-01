@@ -2,12 +2,47 @@ from __future__ import annotations
 
 import random
 from dataclasses import dataclass, field
+from typing import Any, Callable
 from PIL import Image
 
 from .canvas import build_composition, composite_qr_into_scene, is_standalone
 from .pipeline import QRArtPipeline
 from .scanner import scan
 from .styles import compose
+
+
+@dataclass
+class Progress:
+    """Per-job progress emitter. The worker passes one to Generator.generate()
+    so pipeline step callbacks can emit phase-aware events and check for
+    cancellation. publish(type, payload) is the only side-effect — the worker
+    wires it to db.insert_event so SSE subscribers can poll it out.
+    """
+    publish: Callable[[str, dict[str, Any]], None] | None = None
+    is_cancelled: Callable[[], bool] | None = None
+    total_candidates: int = 1
+    candidate_idx: int = 0
+
+    def emit(self, type_: str, **payload: Any) -> None:
+        if self.publish is None:
+            return
+        self.publish(type_, payload)
+
+    def step_cb(self, phase: str, total: int) -> Callable[[int], None]:
+        def cb(step: int) -> None:
+            self.emit(
+                "step",
+                phase=phase,
+                candidate=self.candidate_idx,
+                total_candidates=self.total_candidates,
+                step=step,
+                total_steps=total,
+            )
+        return cb
+
+    @property
+    def cancel_check(self) -> Callable[[], bool] | None:
+        return self.is_cancelled
 
 
 @dataclass
@@ -83,7 +118,11 @@ class Generator:
     def warm(self) -> None:
         self.pipeline.load()
 
-    def generate(self, req: GenerationRequest) -> GenerationResult:
+    def generate(
+        self,
+        req: GenerationRequest,
+        progress: Progress | None = None,
+    ) -> GenerationResult:
         # Composition scaffold goes in BEFORE style preset so the style suffix
         # (RAW photo, 8k, etc.) lands at the very end where SD weighs it most.
         comp = build_composition(req.data, req.composition)
@@ -96,11 +135,23 @@ class Generator:
         candidates: list[Candidate] = []
         rng = random.Random(req.seed)
 
-        for _ in range(max(1, req.candidates)):
+        progress = progress or Progress()
+        progress.total_candidates = max(1, req.candidates)
+
+        for i in range(max(1, req.candidates)):
             seed = rng.randrange(2**31)
-            candidates.append(
-                self._make_candidate(req, comp, seed, prompt, negative)
+            progress.candidate_idx = i
+            progress.emit("candidate_started", idx=i, seed=seed)
+            cand = self._make_candidate(req, comp, seed, prompt, negative, progress)
+            progress.emit(
+                "candidate_done",
+                idx=i,
+                scans=cand.scans,
+                decoded=cand.decoded,
+                controlnet_scale=cand.controlnet_scale,
+                refine_strength=cand.refine_strength,
             )
+            candidates.append(cand)
 
         # Best: scans first, then lowest controlnet_scale (= least visible QR).
         best = sorted(
@@ -114,6 +165,7 @@ class Generator:
         if req.hires_fix or req.adetailer:
             final = best.image
             if req.hires_fix:
+                progress.emit("phase", phase="hires", candidate=best_idx)
                 final = self.pipeline.hires_fix(
                     image=final,
                     prompt=prompt,
@@ -123,8 +175,11 @@ class Generator:
                     steps=req.hires_steps,
                     guidance=req.guidance,
                     seed=best.seed,
+                    step_callback=progress.step_cb("hires", req.hires_steps),
+                    cancel_check=progress.cancel_check,
                 )
             if req.adetailer:
+                progress.emit("phase", phase="adetailer", candidate=best_idx)
                 final = self.pipeline.adetailer_faces(
                     image=final,
                     prompt=prompt,
@@ -133,6 +188,8 @@ class Generator:
                     steps=req.adetailer_steps,
                     guidance=req.guidance,
                     seed=best.seed,
+                    step_callback=progress.step_cb("adetailer", req.adetailer_steps),
+                    cancel_check=progress.cancel_check,
                 )
             decoded = scan(final)
             best = Candidate(
@@ -164,10 +221,12 @@ class Generator:
         seed: int,
         prompt: str,
         negative: str,
+        progress: Progress,
     ) -> Candidate:
         # Generate the QR art using the standalone path. For non-standalone
         # compositions this runs at qr_size × qr_size — small canvas, full QR
         # control image, matches QR Monster's training distribution exactly.
+        progress.emit("phase", phase="pass1", candidate=progress.candidate_idx)
         qr_pass1 = self.pipeline.generate_pass1(
             qr_image=comp.qr_image,
             prompt=prompt,
@@ -181,12 +240,15 @@ class Generator:
             seed=seed,
             width=comp.qr_size,
             height=comp.qr_size,
+            step_callback=progress.step_cb("pass1", req.steps),
+            cancel_check=progress.cancel_check,
         )
 
         # For non-standalone, generate the scene independently. Different seed
         # offset so the scene RNG isn't correlated with the QR art RNG.
         scene: Image.Image | None = None
         if not is_standalone(req.composition):
+            progress.emit("phase", phase="scene", candidate=progress.candidate_idx)
             scene = self.pipeline.generate_scene(
                 prompt=prompt,
                 negative_prompt=negative,
@@ -195,6 +257,8 @@ class Generator:
                 seed=seed + 9001,
                 width=comp.canvas_w,
                 height=comp.canvas_h,
+                step_callback=progress.step_cb("scene", req.steps),
+                cancel_check=progress.cancel_check,
             )
 
         def composite(qr_art: Image.Image) -> Image.Image:
@@ -220,6 +284,10 @@ class Generator:
         last: Candidate | None = None
         pass1_composite = composite(qr_pass1)
         for strength in _refine_strengths(req.refine_strength):
+            progress.emit(
+                "phase", phase="refine", candidate=progress.candidate_idx,
+                strength=strength,
+            )
             qr_refined = self.pipeline.refine(
                 image=qr_pass1,
                 prompt=prompt,
@@ -228,6 +296,8 @@ class Generator:
                 steps=req.refine_steps,
                 guidance=req.guidance,
                 seed=seed,
+                step_callback=progress.step_cb("refine", req.refine_steps),
+                cancel_check=progress.cancel_check,
             )
             final = composite(qr_refined)
             decoded = scan(final)

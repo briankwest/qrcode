@@ -12,6 +12,7 @@ from diffusers import (
     LCMScheduler,
 )
 from PIL import Image
+from typing import Callable
 
 # QR Monster v1 — trained for hiding QR codes inside generated images.
 CONTROLNET_ID = "monster-labs/control_v1p_sd15_qrcode_monster"
@@ -53,6 +54,44 @@ DEFAULT_BASE_MODEL = MODELS["photoreal"]
 
 def resolve_model(name: str) -> str:
     return MODELS.get(name, name)
+
+
+class CancelledByUser(Exception):
+    """Raised by the diffusers step callback when the worker has flagged the
+    job for cancellation. _run_job catches this specifically and marks the
+    DB row 'cancelled' instead of 'failed'."""
+
+
+StepCallback = Callable[[int], None]
+CancelCheck = Callable[[], bool]
+
+
+def _make_diffusers_callback(
+    step_cb: StepCallback | None,
+    cancel_check: CancelCheck | None,
+):
+    """Adapt our simple (step,) callback to diffusers' callback_on_step_end
+    signature (pipe, step_index, timestep, kwargs) -> kwargs.
+
+    Returns None if neither callback is provided so we can omit the param.
+    """
+    if step_cb is None and cancel_check is None:
+        return None
+
+    def adapter(pipe, step_index, timestep, callback_kwargs):
+        if cancel_check is not None and cancel_check():
+            raise CancelledByUser()
+        if step_cb is not None:
+            try:
+                step_cb(step_index + 1)
+            except CancelledByUser:
+                raise
+            except Exception:
+                # Never let a publishing error abort the diffusion run.
+                pass
+        return callback_kwargs
+
+    return adapter
 
 
 def pick_device() -> tuple[str, torch.dtype]:
@@ -203,6 +242,8 @@ class QRArtPipeline:
         seed: int | None,
         width: int,
         height: int,
+        step_callback: StepCallback | None = None,
+        cancel_check: CancelCheck | None = None,
     ) -> Image.Image:
         self.load()
         assert self._pipe is not None
@@ -224,6 +265,7 @@ class QRArtPipeline:
             generator=gen,
             width=width,
             height=height,
+            callback_on_step_end=_make_diffusers_callback(step_callback, cancel_check),
         )
         return out.images[0]
 
@@ -237,6 +279,8 @@ class QRArtPipeline:
         seed: int | None,
         width: int,
         height: int,
+        step_callback: StepCallback | None = None,
+        cancel_check: CancelCheck | None = None,
     ) -> Image.Image:
         """Stage A: clean scene generation with no ControlNet. Used as the
         base for inpaint compositions. Output is what the canvas would look
@@ -256,6 +300,7 @@ class QRArtPipeline:
             generator=gen,
             width=width,
             height=height,
+            callback_on_step_end=_make_diffusers_callback(step_callback, cancel_check),
         )
         return out.images[0]
 
@@ -269,6 +314,8 @@ class QRArtPipeline:
         steps: int,
         guidance: float,
         seed: int | None,
+        step_callback: StepCallback | None = None,
+        cancel_check: CancelCheck | None = None,
     ) -> Image.Image:
         """img2img pass with no ControlNet — smooths QR-textured pass-1 output
         into photorealism while preserving enough structure to still scan.
@@ -288,6 +335,7 @@ class QRArtPipeline:
             num_inference_steps=steps,
             guidance_scale=guidance,
             generator=gen,
+            callback_on_step_end=_make_diffusers_callback(step_callback, cancel_check),
         )
         return out.images[0]
 
@@ -302,6 +350,8 @@ class QRArtPipeline:
         steps: int,
         guidance: float,
         seed: int | None,
+        step_callback: StepCallback | None = None,
+        cancel_check: CancelCheck | None = None,
     ) -> Image.Image:
         """Lanczos-upscale to target_size on the longest dim, then img2img at
         low strength. Adds detail/sharpness without redrawing — strength must
@@ -338,6 +388,7 @@ class QRArtPipeline:
             num_inference_steps=steps,
             guidance_scale=guidance,
             generator=gen,
+            callback_on_step_end=_make_diffusers_callback(step_callback, cancel_check),
         )
         return out.images[0]
 
@@ -351,6 +402,8 @@ class QRArtPipeline:
         steps: int,
         guidance: float,
         seed: int | None,
+        step_callback: StepCallback | None = None,
+        cancel_check: CancelCheck | None = None,
     ) -> Image.Image:
         """Detect faces with cv2 Haar cascade, re-render each at 512x512 via
         img2img, paste back. No-op if no faces detected. Uses lower strength
@@ -407,6 +460,7 @@ class QRArtPipeline:
                 num_inference_steps=steps,
                 guidance_scale=guidance,
                 generator=gen,
+                callback_on_step_end=_make_diffusers_callback(step_callback, cancel_check),
             )
             face_rendered = out.images[0].resize(orig_size, Image.LANCZOS)
             result.paste(face_rendered, (x1, y1))
