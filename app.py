@@ -26,15 +26,86 @@ OUTPUT_DIR = ROOT / "outputs"
 OUTPUT_DIR.mkdir(exist_ok=True)
 
 app = FastAPI(title="QR Art Studio")
+
+
+# Optional shared-password auth. If QRART_AUTH=user:pass is set in the env,
+# every /api/* request (and /outputs/* + the index) is gated behind HTTP
+# Basic auth using a timing-safe compare. /api/health stays open so external
+# probes don't have to know the password.
+import base64 as _b64
+import os as _os
+import secrets as _secrets
+
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import Response as _Response
+
+_AUTH = _os.environ.get("QRART_AUTH")
+
+
+class _BasicAuthMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        if not _AUTH:
+            return await call_next(request)
+        path = request.url.path
+        # Allow open access to the health endpoint so probes don't need creds.
+        if path == "/api/health":
+            return await call_next(request)
+        header = request.headers.get("authorization", "")
+        ok = False
+        if header.lower().startswith("basic "):
+            try:
+                creds = _b64.b64decode(header.split(" ", 1)[1]).decode()
+                ok = _secrets.compare_digest(creds, _AUTH)
+            except Exception:
+                ok = False
+        if not ok:
+            return _Response(
+                status_code=401,
+                headers={"WWW-Authenticate": 'Basic realm="QR Art Studio"'},
+            )
+        return await call_next(request)
+
+
+if _AUTH:
+    app.add_middleware(_BasicAuthMiddleware)
+    print("[auth] basic auth enabled via QRART_AUTH env var", flush=True)
+
 app.mount("/outputs", StaticFiles(directory=OUTPUT_DIR), name="outputs")
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+
+RETENTION_KEEP = int(__import__("os").environ.get("QRART_RETENTION_KEEP", "1000"))
+
+
+def _cleanup_evicted_files(evicted_ids: list[str]) -> int:
+    """Best-effort rm -rf of the outputs/{id}/ directories for evicted jobs.
+    Returns the number of directories actually removed."""
+    import shutil as _shutil
+    removed = 0
+    for jid in evicted_ids:
+        d = OUTPUT_DIR / jid
+        if d.exists():
+            try:
+                _shutil.rmtree(d)
+                removed += 1
+            except OSError:
+                pass
+    return removed
 
 
 @app.on_event("startup")
 def _startup() -> None:
     # Initialize SQLite + run migrations + mark orphans before the first
     # request arrives. Runs once per process.
-    get_db()
+    db = get_db()
+    evicted = db.evict_old_jobs(keep=RETENTION_KEEP)
+    if evicted:
+        removed = _cleanup_evicted_files(evicted)
+        print(
+            f"[retention] kept newest {RETENTION_KEEP} jobs, "
+            f"evicted {len(evicted)} (removed {removed} output dirs)",
+            flush=True,
+        )
     _worker.start()
 
 
@@ -422,6 +493,16 @@ def set_favorite(prompt_id: int, body: FavoriteBody) -> dict[str, Any]:
 def stats() -> dict[str, Any]:
     db = get_db()
     return db.stats()
+
+
+@app.post("/api/admin/cleanup")
+def admin_cleanup(keep: int = 1000) -> dict[str, Any]:
+    """Manual retention sweep. Defaults to the same retention as startup.
+    Returns the evicted job count + how many output dirs were removed."""
+    db = get_db()
+    evicted = db.evict_old_jobs(keep=max(1, keep))
+    removed = _cleanup_evicted_files(evicted)
+    return {"evicted": len(evicted), "removed_dirs": removed, "keep": keep}
 
 
 @app.get("/api/jobs/{job_id}/stream")

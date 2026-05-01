@@ -325,6 +325,24 @@ class Database:
             "top_prompts": top_prompts,
         }
 
+    # ── Retention ────────────────────────────────────────────────────────────
+    def evict_old_jobs(self, keep: int = 1000) -> list[str]:
+        """Keep the most recent `keep` jobs, delete the rest. Returns the
+        list of evicted job ids so the caller can also rm -rf their output
+        directories. ON DELETE CASCADE handles candidates + job_events.
+        """
+        rows = self.conn.execute(
+            "SELECT id FROM jobs ORDER BY created_at DESC LIMIT -1 OFFSET ?",
+            (keep,),
+        ).fetchall()
+        ids = [r["id"] for r in rows]
+        if not ids:
+            return []
+        with self._write_lock:
+            placeholders = ",".join("?" * len(ids))
+            self.conn.execute(f"DELETE FROM jobs WHERE id IN ({placeholders})", ids)
+        return ids
+
     # ── Recovery ─────────────────────────────────────────────────────────────
     def mark_orphans_failed(self) -> int:
         """On startup, any job left in 'running' or 'queued' from a prior

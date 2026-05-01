@@ -196,13 +196,19 @@ class QRArtPipeline:
         if self._lcm_loaded:
             return
         assert self._pipe is not None
-        # Load with an adapter name so we can toggle it on/off later without unloading.
-        self._pipe.load_lora_weights(LCM_LORA_ID, adapter_name="lcm")
+        # Load the LoRA. Earlier code passed adapter_name="lcm" then called
+        # set_adapters(["lcm"]) — in diffusers 0.37 the adapter name doesn't
+        # register reliably when the pipeline has multi-controlnet attached,
+        # producing "Adapter name(s) {'lcm'} not in the list of present
+        # adapters: set()". enable_lora()/disable_lora() works regardless of
+        # naming, so use that for the toggle.
+        self._pipe.load_lora_weights(LCM_LORA_ID)
+        self._pipe.disable_lora()  # default off; set_fast_mode flips it on
         self._lcm_loaded = True
 
     def set_fast_mode(self, fast: bool) -> None:
-        """Switch between Quality (Euler-Ancestral, full LoRA off) and Fast
-        (LCM scheduler + LCM LoRA active). Idempotent — calling twice is a no-op."""
+        """Switch between Quality (Euler-Ancestral, LoRA disabled) and Fast
+        (LCM scheduler + LCM LoRA enabled). Idempotent — calling twice is a no-op."""
         if fast == self._fast_mode and self._pipe is not None:
             return
         self.load()
@@ -210,17 +216,14 @@ class QRArtPipeline:
         if fast:
             self.ensure_lcm()
             self._pipe.scheduler = LCMScheduler.from_config(self._pipe.scheduler.config)
-            self._pipe.set_adapters(["lcm"], adapter_weights=[1.0])
+            self._pipe.enable_lora()
         else:
             assert self._default_scheduler_config is not None
             self._pipe.scheduler = EulerAncestralDiscreteScheduler.from_config(
                 self._default_scheduler_config
             )
             if self._lcm_loaded:
-                try:
-                    self._pipe.set_adapters([], adapter_weights=[])
-                except Exception:
-                    self._pipe.disable_lora()
+                self._pipe.disable_lora()
         # Keep all sibling pipes (refiner, scene, inpaint) on the same scheduler.
         self._refiner.scheduler = self._pipe.scheduler
         if self._scene_pipe is not None:
