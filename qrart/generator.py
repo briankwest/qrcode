@@ -72,6 +72,10 @@ class GenerationRequest:
     require_scan: bool = True
     # A2: see app.GenerateBody. Persisted on the request so reruns inherit it.
     auto_escalate: bool = True
+    # QR Monster ControlNet version: 'v1' or 'v2'. v2 carries stronger QR
+    # signal at the same scale, so users running v2 typically dial scale
+    # down ~0.10 from their v1 settings.
+    qr_monster_version: str = "v1"
     # Fast mode: swaps in LCM-LoRA + LCMScheduler. ~3–4x faster, slight fidelity drop.
     fast_mode: bool = False
     # Hi-res fix: upscale best candidate via Lanczos and run a low-strength
@@ -148,7 +152,9 @@ class Generator:
         prompt, negative = compose(full_prompt, req.style, req.negative_prompt)
 
         # Apply Fast/Quality mode once per request so all candidates use the
-        # same scheduler/LoRA state.
+        # same scheduler/LoRA state. Pin the QR Monster version too — both
+        # are loaded so this is just a pointer swap.
+        self.pipeline.set_qr_monster_version(req.qr_monster_version)
         self.pipeline.set_fast_mode(req.fast_mode)
         candidates: list[Candidate] = []
         rng = random.Random(req.seed)

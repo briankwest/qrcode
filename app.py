@@ -18,7 +18,12 @@ from pydantic import BaseModel, Field
 from qrart import COMPOSITIONS, Generator, GenerationRequest, STYLE_PRESETS
 from qrart.db import get_db, new_job_id
 from qrart.generator import Progress
-from qrart.pipeline import MODELS, QR_MONSTER_VERSION, CancelledByUser
+from qrart.pipeline import (
+    MODELS,
+    QR_MONSTER_VERSIONS,
+    QR_MONSTER_DEFAULT,
+    CancelledByUser,
+)
 from qrart.worker import Job, MAX_QUEUED, QueueFull, Worker
 
 # A2: auto-escalation tuning. When the user opts in (require_scan=True,
@@ -161,6 +166,9 @@ class GenerateBody(BaseModel):
     # scale +0.1 (capped at 1.5) until one passes or we hit the cap. Off → user
     # gets the failed result and can manually retry.
     auto_escalate: bool = True
+    # QR Monster ControlNet version: 'v1' (default) or 'v2'. Both are loaded
+    # at warm time and swapped per-request without a model reload.
+    qr_monster_version: str = "v1"
     fast_mode: bool = False
     hires_fix: bool = False
     hires_target: int = 1024
@@ -188,7 +196,8 @@ def health() -> dict[str, Any]:
         "device": g.pipeline.device,
         "loaded": g.pipeline._pipe is not None,
         "base_model": g.pipeline.base_model,
-        "qr_monster_version": QR_MONSTER_VERSION,
+        "qr_monster_default": QR_MONSTER_DEFAULT,
+        "qr_monster_versions": list(QR_MONSTER_VERSIONS),
         "styles": list(STYLE_PRESETS.keys()),
         "compositions": list(COMPOSITIONS.keys()),
         "models": list(MODELS.keys()),
@@ -422,6 +431,10 @@ def generate(body: GenerateBody, request: Request) -> dict[str, Any]:
         seed=body.seed,
         require_scan=body.require_scan,
         auto_escalate=body.auto_escalate,
+        qr_monster_version=(
+            body.qr_monster_version if body.qr_monster_version in QR_MONSTER_VERSIONS
+            else QR_MONSTER_DEFAULT
+        ),
         fast_mode=body.fast_mode,
         hires_fix=body.hires_fix,
         hires_target=max(768, min(body.hires_target, 1536)),
@@ -448,6 +461,7 @@ def generate(body: GenerateBody, request: Request) -> dict[str, Any]:
         "hires_strength": req.hires_strength,
         "adetailer_strength": req.adetailer_strength,
         "composition": composition,
+        "qr_monster_version": req.qr_monster_version,
         "client_ip": request.client.host if request.client else None,
         "user_agent": request.headers.get("user-agent"),
     }
@@ -519,6 +533,7 @@ def rerun_job(
         seed=src["seed"] if keep_seed else None,
         require_scan=bool(src["require_scan"]),
         auto_escalate=bool(src.get("auto_escalate", 1)),
+        qr_monster_version=src.get("qr_monster_version") or QR_MONSTER_DEFAULT,
         fast_mode=bool(src["fast_mode"]),
         hires_fix=bool(src["hires_fix"]),
         hires_target=src["hires_target"],

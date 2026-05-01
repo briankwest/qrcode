@@ -81,7 +81,8 @@ class Database:
         cols = (
             "id created_at status data prompt negative_prompt style model "
             "composition candidates steps guidance controlnet_scale tile_scale control_end "
-            "refine refine_strength refine_steps size seed require_scan auto_escalate fast_mode "
+            "refine refine_strength refine_steps size seed require_scan auto_escalate "
+            "qr_monster_version fast_mode "
             "hires_fix hires_target hires_strength adetailer adetailer_strength "
             "client_ip user_agent parent_job_id"
         ).split()
@@ -95,6 +96,7 @@ class Database:
             int(bool(body["refine"])), body["refine_strength"], body["refine_steps"],
             body["size"], body.get("seed"), int(bool(body["require_scan"])),
             int(bool(body.get("auto_escalate", True))),
+            body.get("qr_monster_version", "v1"),
             int(bool(body["fast_mode"])),
             int(bool(body["hires_fix"])), body["hires_target"], body["hires_strength"],
             int(bool(body["adetailer"])), body["adetailer_strength"],

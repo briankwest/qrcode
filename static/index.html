@@ -370,6 +370,13 @@
     </select>
     <div class="hint" id="modelHint">Each model is ~4GB and downloaded on first use. Switch between them to compare aesthetics.</div>
 
+    <label for="qrMonsterVersion">QR Monster ControlNet</label>
+    <select id="qrMonsterVersion">
+      <option value="v1" selected>v1 — original (scale ~1.10–1.20 for scans)</option>
+      <option value="v2">v2 — stronger QR signal (scale ~0.95–1.05 for scans)</option>
+    </select>
+    <div class="hint">v2 hides the QR more cleanly at lower scales but can over-dominate at v1's scale settings — drop scale ~0.10 if you switch.</div>
+
     <label for="style">Style</label>
     <select id="style">
       <option value="photoreal" selected>photoreal</option>
@@ -950,6 +957,7 @@
       prompt: $("prompt").value,
       style: $("style").value,
       model: $("model").value,
+      qr_monster_version: $("qrMonsterVersion").value,
       composition: $("composition").value,
       controlnet_scale: parseFloat($("scale").value),
       tile_scale: parseFloat($("tileScale").value),
@@ -1371,6 +1379,7 @@
     setSlider("refineStrength", j.refine_strength);
     $("size").value = j.size;
     $("seed").value = j.seed != null ? j.seed : "";
+    if (j.qr_monster_version) $("qrMonsterVersion").value = j.qr_monster_version;
 
     setSwitch("refineSwitch", !!j.refine);
     $("refineControls").style.display = j.refine ? "block" : "none";

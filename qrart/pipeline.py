@@ -17,14 +17,26 @@ from typing import Callable
 import os as _os
 
 # QR Monster ControlNet — trained for hiding QR codes inside generated images.
-# The repo ships both v1 (root) and v2 (subfolder). v1 is the default; v2
-# tends to produce slightly stronger QR signal at the same scale slider, so
-# at v2 you can run scale ~0.95-1.05 for the same scan rate that v1 needs
-# 1.10-1.20 for. Toggle with `QRART_MONSTER_VERSION=v2`.
+# The repo ships both v1 (root) and v2 (subfolder). Both are loaded at warm
+# time and swappable per-request: v2 produces slightly stronger QR signal at
+# the same scale slider, so at v2 you can run scale ~0.95-1.05 for the same
+# scan rate v1 needs 1.10-1.20 for. The active version is selected on the
+# generate request (qr_monster_version) and swapped into pipe.controlnet
+# without rebuilding the pipe.
+#
+# QRART_MONSTER_VERSION sets the *default* when no version is requested.
 _MONSTER_REPO = "monster-labs/control_v1p_sd15_qrcode_monster"
-QR_MONSTER_VERSION = _os.environ.get("QRART_MONSTER_VERSION", "v1").lower()
+QR_MONSTER_VERSIONS = ("v1", "v2")
+QR_MONSTER_DEFAULT = _os.environ.get("QRART_MONSTER_VERSION", "v1").lower()
+if QR_MONSTER_DEFAULT not in QR_MONSTER_VERSIONS:
+    QR_MONSTER_DEFAULT = "v1"
+# Back-compat alias for callers that imported the old name.
+QR_MONSTER_VERSION = QR_MONSTER_DEFAULT
 CONTROLNET_ID = _MONSTER_REPO
-CONTROLNET_SUBFOLDER = "v2" if QR_MONSTER_VERSION == "v2" else None
+
+
+def _qr_monster_subfolder(version: str) -> str | None:
+    return "v2" if version == "v2" else None
 
 # Tile ControlNet — when stacked alongside QR Monster, it adds a coherence /
 # detail-preservation signal that pushes outputs toward photo (less QR-noisy)
@@ -143,14 +155,33 @@ class QRArtPipeline:
         self._lcm_loaded = False
         self._fast_mode = False
         self._default_scheduler_config: dict | None = None
+        # Both QR Monster ControlNets — loaded once at warm time and swapped
+        # by rebinding pipe.controlnet.nets[0]. Keeping both resident costs
+        # ~700MB RAM but avoids a 5-10s reload per version switch.
+        self._qr_controlnets: dict[str, ControlNetModel] = {}
+        self._active_qr_version: str = QR_MONSTER_DEFAULT
+
+    def _load_qr_controlnet(self, version: str) -> ControlNetModel:
+        if version in self._qr_controlnets:
+            return self._qr_controlnets[version]
+        qr_kwargs: dict = {"torch_dtype": self.dtype}
+        sub = _qr_monster_subfolder(version)
+        if sub:
+            qr_kwargs["subfolder"] = sub
+        cn = ControlNetModel.from_pretrained(CONTROLNET_ID, **qr_kwargs)
+        if self.device != "cpu":
+            cn = cn.to(self.device)
+        self._qr_controlnets[version] = cn
+        return cn
 
     def load(self) -> None:
         if self._pipe is not None:
             return
-        qr_kwargs: dict = {"torch_dtype": self.dtype}
-        if CONTROLNET_SUBFOLDER:
-            qr_kwargs["subfolder"] = CONTROLNET_SUBFOLDER
-        qr_controlnet = ControlNetModel.from_pretrained(CONTROLNET_ID, **qr_kwargs)
+        # Load BOTH versions up-front so the user can switch between them
+        # without a model reload between jobs.
+        for v in QR_MONSTER_VERSIONS:
+            self._load_qr_controlnet(v)
+        qr_controlnet = self._qr_controlnets[self._active_qr_version]
         tile_controlnet = ControlNetModel.from_pretrained(CONTROLNET_TILE_ID, torch_dtype=self.dtype)
         # Multi-ControlNet: QR Monster does the heavy lifting, Tile rides along
         # at low scale to bias toward coherent photo structure.
@@ -217,6 +248,26 @@ class QRArtPipeline:
         self._pipe.load_lora_weights(LCM_LORA_ID)
         self._pipe.disable_lora()  # default off; set_fast_mode flips it on
         self._lcm_loaded = True
+
+    def set_qr_monster_version(self, version: str) -> None:
+        """Swap the active QR Monster ControlNet on the multi-controlnet.
+
+        Both v1 and v2 are pre-loaded by load(); this is just a pointer
+        rebind on pipe.controlnet.nets[0] (the QR slot — the Tile
+        ControlNet stays at index 1). Idempotent.
+        """
+        if version not in QR_MONSTER_VERSIONS:
+            raise ValueError(f"unknown QR Monster version: {version}")
+        if version == self._active_qr_version and self._pipe is not None:
+            return
+        self.load()
+        assert self._pipe is not None
+        cn = self._load_qr_controlnet(version)
+        # MultiControlNetModel exposes its members via .nets (list-like).
+        # Rebinding [0] is enough — the pipe holds a reference to the
+        # MultiControlNet wrapper, not the inner net directly.
+        self._pipe.controlnet.nets[0] = cn
+        self._active_qr_version = version
 
     def set_fast_mode(self, fast: bool) -> None:
         """Switch between Quality (Euler-Ancestral, LoRA disabled) and Fast
