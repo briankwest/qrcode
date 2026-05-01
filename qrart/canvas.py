@@ -202,6 +202,33 @@ def _reinforce_finders(
     return Image.fromarray(np.clip(out_arr, 0, 255).astype(np.uint8))
 
 
+QUIET_ZONE_PX = 8  # B2: light-ring pad between scene and QR modules
+
+
+def _quiet_zone_pad(qr_art: Image.Image, pad: int) -> Image.Image:
+    """Wrap the QR art in a `pad`-pixel light ring (sampled from the QR's own
+    light-module luminance so the ring matches the art's tonal palette, not
+    pure white which would look pasted-on).
+    """
+    if pad <= 0:
+        return qr_art
+    src = qr_art.convert("RGB")
+    arr = np.array(src)
+    # Sample the brightest 5% of pixels in the QR art for the ring color —
+    # these are the "light modules" so the ring tonally matches them.
+    luma = arr.mean(axis=2)
+    if luma.size == 0:
+        ring_color = (255, 255, 255)
+    else:
+        thr = np.quantile(luma, 0.95)
+        bright = arr[luma >= thr]
+        ring_color = tuple(int(v) for v in bright.mean(axis=0)) if bright.size else (255, 255, 255)
+    w, h = src.size
+    out = Image.new("RGB", (w + 2 * pad, h + 2 * pad), ring_color)
+    out.paste(src, (pad, pad))
+    return out
+
+
 def composite_qr_into_scene(
     scene: Image.Image,
     qr_art: Image.Image,
@@ -209,14 +236,19 @@ def composite_qr_into_scene(
     feather_px: int = 4,
     data: str | None = None,
     reinforce_finders: bool = True,
+    quiet_zone_px: int = QUIET_ZONE_PX,
 ) -> Image.Image:
     """Paste qr_art into scene at the composition's QR position with a
-    finder-aware alpha mask, then optionally reinforce the three corner
-    finder patterns by alpha-blending the ground-truth pattern over them.
+    finder-aware alpha mask, a quiet-zone pad ring, and optional finder
+    reinforcement.
 
     feather_px is the soft-edge radius applied to BR + interior edges only.
     The TL/TR/BL finder-pattern corners are kept hard (no feathering) — they
     are the most fragile QR feature and even a 4-px blur can break detection.
+
+    quiet_zone_px adds a tonally-matched light ring inside the qr_size area
+    BEFORE the QR modules. Scanners need a quiet zone to lock onto finder
+    patterns; in compositions the scene reaches the QR boundary by default.
 
     `data` is the QR payload — required when `reinforce_finders=True` so we
     can render the ground-truth finder pattern.
@@ -226,7 +258,11 @@ def composite_qr_into_scene(
     qsz = cfg["qr_size"]
 
     out = scene.copy().convert("RGB")
-    qr_resized = qr_art.resize((qsz, qsz)).convert("RGB")
+    # Pad the QR art with a quiet-zone ring (effectively shrinks the QR
+    # modules slightly) before resizing back to qsz so the paste still fills
+    # the canvas slot.
+    padded = _quiet_zone_pad(qr_art, quiet_zone_px)
+    qr_resized = padded.resize((qsz, qsz)).convert("RGB")
     out.paste(qr_resized, (qx, qy), _finder_aware_mask(qsz, feather_px))
 
     if reinforce_finders and data is not None:
