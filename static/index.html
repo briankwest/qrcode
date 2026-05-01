@@ -680,7 +680,10 @@
       const loaded = (j.loaded_models || []);
       let summary = loaded.length ? `loaded: ${loaded.join(", ")}` : "cold";
       if (j.busy) {
-        summary = `busy · ${j.active_model} · ${j.active_elapsed_s}s`;
+        summary = `running · ${j.active_model} · ${j.active_elapsed_s}s`;
+      }
+      if (j.queue_depth > 0) {
+        summary += ` · queue ${j.queue_depth}/${j.max_queued}`;
       }
       $("device").textContent = `${j.device} · ${summary}`;
       return j;
@@ -836,11 +839,10 @@
         body: JSON.stringify(body),
       });
       if (r.status === 503) {
-        // Server-side busy. Surface clearly instead of failing as a generic error.
         const j = await r.json().catch(() => ({}));
-        const detail = j.detail || "Server busy.";
-        prev.innerHTML = `<div class="placeholder"><strong>Server busy</strong>${detail}</div>`;
-        $("status").textContent = "Busy — wait for the current run to finish, then retry.";
+        const detail = j.detail || "Queue full.";
+        prev.innerHTML = `<div class="placeholder"><strong>Queue full</strong>${detail}</div>`;
+        $("status").textContent = "Queue full — wait for a slot, then retry.";
         refreshHealth();
         btn.disabled = false;
         return;
@@ -849,21 +851,91 @@
         const t = await r.text();
         throw new Error(t || r.statusText);
       }
-      const j = await r.json();
-      lastJob = j;
-      const best = j.candidates[j.best_index];
-      setQrPreview(j.qr_url);
-      renderGallery(j.candidates, j.best_index);
-      showCandidate(best);
-      $("status").textContent = `Done in ${j.elapsed_s}s · ${j.scans ? "decoded" : "did not decode"} · job ${j.job_id}`;
+      const ack = await r.json();
+      currentJobId = ack.job_id;
+      $("status").textContent = `Queued · position ${ack.queue_position} · job ${ack.job_id}`;
       refreshHealth();
+      pollJob(ack.job_id);
     } catch (e) {
       prev.innerHTML = `<div class="placeholder"><strong>Error</strong>${e.message}</div>`;
       $("status").textContent = "Failed.";
-    } finally {
       btn.disabled = false;
     }
   });
+
+  // ── Async polling ────────────────────────────────────────────────────────
+  // The Generate button now enqueues; the worker runs in the background. We
+  // poll /api/jobs/{id} every 2s until status leaves queued/running, then
+  // render the results from the DB row (URLs are already web-rooted).
+  let currentJobId = null;
+  let pollTimer = null;
+
+  function stopPolling() {
+    if (pollTimer) {
+      clearTimeout(pollTimer);
+      pollTimer = null;
+    }
+  }
+
+  async function pollJob(jobId) {
+    stopPolling();
+    try {
+      const r = await fetch(`/api/jobs/${jobId}`);
+      if (!r.ok) throw new Error(`fetch ${jobId} failed: ${r.status}`);
+      const j = await r.json();
+      const status = j.status;
+      if (status === "queued") {
+        $("status").textContent = `Queued · job ${jobId}`;
+      } else if (status === "running") {
+        const elapsed = j.started_at
+          ? Math.round((Date.now() - new Date(j.started_at + "Z").getTime()) / 1000)
+          : "?";
+        $("status").textContent = `Running · ${elapsed}s · job ${jobId}`;
+      } else if (status === "completed") {
+        renderJob(j);
+        $("go").disabled = false;
+        refreshHealth();
+        return;
+      } else if (status === "failed") {
+        $("preview").innerHTML = `<div class="placeholder"><strong>Failed</strong>${(j.error || "").split("\n")[0]}</div>`;
+        $("status").textContent = `Failed · job ${jobId}`;
+        $("go").disabled = false;
+        refreshHealth();
+        return;
+      } else if (status === "cancelled") {
+        $("preview").innerHTML = `<div class="placeholder"><strong>Cancelled</strong></div>`;
+        $("status").textContent = `Cancelled · job ${jobId}`;
+        $("go").disabled = false;
+        refreshHealth();
+        return;
+      }
+    } catch (e) {
+      $("status").textContent = `Poll error: ${e.message}`;
+    }
+    pollTimer = setTimeout(() => pollJob(jobId), 2000);
+    refreshHealth();
+  }
+
+  function renderJob(j) {
+    // Map DB row shape -> existing renderers' expected fields.
+    const cands = (j.candidates || []).map((c, i) => ({
+      id: c.id,
+      index: c.idx,
+      url: c.image_path,
+      pass1_url: c.pass1_image_path || undefined,
+      seed: c.seed,
+      scans: !!c.scans,
+      decoded: c.decoded,
+      controlnet_scale: c.controlnet_scale,
+      refine_strength: c.refine_strength,
+    }));
+    const bestIndex = cands.findIndex((c) => c.id === j.best_candidate_id);
+    setQrPreview(j.qr_image_path);
+    renderGallery(cands, Math.max(0, bestIndex));
+    if (cands.length) showCandidate(cands[bestIndex >= 0 ? bestIndex : 0]);
+    $("status").textContent =
+      `Done in ${j.elapsed_s}s · ${j.scans ? "decoded" : "did not decode"} · job ${j.id}`;
+  }
 </script>
 </body>
 </html>

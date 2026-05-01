@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 from qrart import COMPOSITIONS, Generator, GenerationRequest, STYLE_PRESETS
 from qrart.db import get_db, new_job_id
 from qrart.pipeline import MODELS
+from qrart.worker import Job, MAX_QUEUED, QueueFull, Worker
 
 ROOT = Path(__file__).parent
 STATIC_DIR = ROOT / "static"
@@ -30,17 +31,18 @@ def _startup() -> None:
     # Initialize SQLite + run migrations + mark orphans before the first
     # request arrives. Runs once per process.
     get_db()
+    _worker.start()
+
+
+@app.on_event("shutdown")
+def _shutdown() -> None:
+    _worker.stop()
 
 # One Generator per model, lazily created on first use. Models that haven't
 # been used in this session don't consume memory. Switching back to a model
 # you used earlier is instant.
 _generators: dict[str, Generator] = {}
 _gen_lock = threading.Lock()
-# Diffusion is single-GPU/MPS — serialize requests so we don't OOM.
-_run_lock = threading.Lock()
-# Snapshot of the current in-flight job so /api/health can surface "busy".
-_active: dict[str, Any] = {"model": None, "started_at": None}
-_active_lock = threading.Lock()
 
 
 def get_generator(model: str | None = None) -> Generator:
@@ -91,10 +93,7 @@ def index() -> HTMLResponse:
 def health() -> dict[str, Any]:
     g = get_generator()
     loaded_models = [k for k, gen in _generators.items() if gen.pipeline._pipe is not None]
-    with _active_lock:
-        active_model = _active["model"]
-        active_started = _active["started_at"]
-    busy = active_model is not None
+    state = _worker.state()
     return {
         "ok": True,
         "device": g.pipeline.device,
@@ -104,11 +103,7 @@ def health() -> dict[str, Any]:
         "compositions": list(COMPOSITIONS.keys()),
         "models": list(MODELS.keys()),
         "loaded_models": loaded_models,
-        "busy": busy,
-        "active_model": active_model,
-        "active_elapsed_s": (
-            round(time.time() - active_started, 1) if active_started else None
-        ),
+        **state,  # busy, active_model, active_job_id, active_elapsed_s, queue_depth, queued_ids, max_queued
     }
 
 
@@ -124,8 +119,84 @@ def warm(body: WarmBody | None = None) -> dict[str, Any]:
     return {"ok": True, "elapsed_s": round(time.time() - t0, 2), "model": model}
 
 
+def _run_job(job: Job, cancelled: bool) -> None:
+    """Worker callback. Drives the pipeline + persistence for one job.
+
+    Cancelled jobs (cancelled while queued) get marked 'cancelled' in DB and
+    never invoke the pipeline. Otherwise we update to 'running', generate,
+    save outputs + candidates, and finish to 'completed' (or 'failed').
+    """
+    db = get_db()
+    if cancelled:
+        db.finish_job(job.job_id, status="cancelled", elapsed_s=0.0)
+        return
+
+    db.mark_running(job.job_id)
+    t0 = time.time()
+    try:
+        result = get_generator(job.model).generate(job.request)
+    except Exception as e:
+        elapsed = round(time.time() - t0, 2)
+        db.finish_job(
+            job.job_id,
+            status="failed",
+            elapsed_s=elapsed,
+            error=f"{e}\n\n{traceback.format_exc()}",
+        )
+        print(f"[worker] {job.job_id} FAILED: {e}", flush=True)
+        return
+
+    elapsed = round(time.time() - t0, 2)
+    job_dir = OUTPUT_DIR / job.job_id
+    job_dir.mkdir(parents=True, exist_ok=True)
+
+    candidate_ids: list[str] = []
+    for i, c in enumerate(result.candidates):
+        path = job_dir / f"cand{i}.png"
+        c.image.save(path)
+        pass1_url: str | None = None
+        if c.pass1_image is not None:
+            pass1_path = job_dir / f"cand{i}.pass1.png"
+            c.pass1_image.save(pass1_path)
+            pass1_url = f"/outputs/{job.job_id}/cand{i}.pass1.png"
+        cid = db.insert_candidate(
+            job_id=job.job_id,
+            idx=i,
+            seed=c.seed,
+            controlnet_scale=c.controlnet_scale,
+            refine_strength=c.refine_strength,
+            scans=c.scans,
+            decoded=c.decoded,
+            image_path=f"/outputs/{job.job_id}/cand{i}.png",
+            pass1_image_path=pass1_url,
+        )
+        candidate_ids.append(cid)
+
+    qr_path = job_dir / "qr.png"
+    result.qr_image.save(qr_path)
+
+    best_idx = next(
+        (i for i, c in enumerate(result.candidates) if c.image is result.image), 0
+    )
+    db.finish_job(
+        job.job_id,
+        status="completed",
+        elapsed_s=elapsed,
+        scans=result.scans,
+        decoded=result.decoded,
+        qr_image_path=f"/outputs/{job.job_id}/qr.png",
+        best_candidate_id=candidate_ids[best_idx] if candidate_ids else None,
+    )
+    print(f"[worker] {job.job_id} done in {elapsed}s · scans={result.scans}", flush=True)
+
+
+_worker = Worker(_run_job)
+
+
 @app.post("/api/generate")
 def generate(body: GenerateBody, request: Request) -> dict[str, Any]:
+    """Enqueue a generation job. Returns immediately — poll /api/jobs/{id}
+    until status flips to completed / failed / cancelled."""
     if not body.data.strip() or not body.prompt.strip():
         raise HTTPException(400, "data and prompt are required")
 
@@ -183,20 +254,11 @@ def generate(body: GenerateBody, request: Request) -> dict[str, Any]:
         adetailer_strength=max(0.1, min(body.adetailer_strength, 0.6)),
     )
 
-    # Non-blocking acquire — surface a busy state instead of silently queueing.
-    # Otherwise stacked clicks pile up minutes-deep behind the lock and look
-    # like timeouts to the browser.
-    if not _run_lock.acquire(blocking=False):
-        raise HTTPException(
-            503,
-            "Generation already in progress. Wait for the current request to finish, then retry.",
-        )
-
     db = get_db()
     job_id = new_job_id()
 
-    # Snapshot the values we'll actually run with (post-clamp, post-fast-mode
-    # override) so the DB row reflects what diffused, not the raw request.
+    # Snapshot post-clamp values so the DB row reflects what diffused, not
+    # the raw request body.
     persisted = {
         **body.model_dump(),
         "candidates": req.candidates,
@@ -216,96 +278,49 @@ def generate(body: GenerateBody, request: Request) -> dict[str, Any]:
     db.insert_job(job_id, persisted)
     db.touch_prompt(body.prompt)
 
-    t0 = time.time()
+    job = Job(job_id=job_id, model=body.model, request=req, body=persisted)
     try:
-        with _active_lock:
-            _active["model"] = body.model
-            _active["started_at"] = t0
-        result = get_generator(body.model).generate(req)
-        elapsed = round(time.time() - t0, 2)
-    except Exception as e:
-        elapsed = round(time.time() - t0, 2)
+        position = _worker.enqueue(job)
+    except QueueFull:
+        # Roll the row to 'failed' so the user sees why and the queue stays
+        # consistent with what the DB shows.
         db.finish_job(
             job_id,
             status="failed",
-            elapsed_s=elapsed,
-            error=f"{e}\n\n{traceback.format_exc()}",
+            elapsed_s=0.0,
+            error=f"queue at capacity ({MAX_QUEUED}); try again in a moment",
         )
-        raise HTTPException(500, f"Generation failed: {e}")
-    finally:
-        with _active_lock:
-            _active["model"] = None
-            _active["started_at"] = None
-        _run_lock.release()
-
-    job_dir = OUTPUT_DIR / job_id
-    job_dir.mkdir(parents=True, exist_ok=True)
-
-    saved: list[dict[str, Any]] = []
-    candidate_ids: list[str] = []
-    for i, c in enumerate(result.candidates):
-        path = job_dir / f"cand{i}.png"
-        c.image.save(path)
-        pass1_path: Path | None = None
-        if c.pass1_image is not None:
-            pass1_path = job_dir / f"cand{i}.pass1.png"
-            c.pass1_image.save(pass1_path)
-        cid = db.insert_candidate(
-            job_id=job_id,
-            idx=i,
-            seed=c.seed,
-            controlnet_scale=c.controlnet_scale,
-            refine_strength=c.refine_strength,
-            scans=c.scans,
-            decoded=c.decoded,
-            image_path=f"/outputs/{job_id}/cand{i}.png",
-            pass1_image_path=(
-                f"/outputs/{job_id}/cand{i}.pass1.png" if pass1_path else None
-            ),
+        raise HTTPException(
+            503,
+            f"Queue full ({MAX_QUEUED} jobs). Wait for one to finish, then retry.",
         )
-        candidate_ids.append(cid)
-        entry: dict[str, Any] = {
-            "id": cid,
-            "index": i,
-            "url": f"/outputs/{job_id}/cand{i}.png",
-            "seed": c.seed,
-            "scans": c.scans,
-            "decoded": c.decoded,
-            "controlnet_scale": round(c.controlnet_scale, 3),
-            "refine_strength": (
-                round(c.refine_strength, 3) if c.refine_strength is not None else None
-            ),
-        }
-        if pass1_path is not None:
-            entry["pass1_url"] = f"/outputs/{job_id}/cand{i}.pass1.png"
-        saved.append(entry)
-
-    qr_path = job_dir / "qr.png"
-    result.qr_image.save(qr_path)
-
-    best_idx = next(
-        (i for i, c in enumerate(result.candidates) if c.image is result.image),
-        0,
-    )
-    db.finish_job(
-        job_id,
-        status="completed",
-        elapsed_s=elapsed,
-        scans=result.scans,
-        decoded=result.decoded,
-        qr_image_path=f"/outputs/{job_id}/qr.png",
-        best_candidate_id=candidate_ids[best_idx] if candidate_ids else None,
-    )
 
     return {
         "job_id": job_id,
-        "elapsed_s": elapsed,
-        "best_index": best_idx,
-        "scans": result.scans,
-        "decoded": result.decoded,
-        "qr_url": f"/outputs/{job_id}/qr.png",
-        "candidates": saved,
+        "status": "queued",
+        "queue_position": position,
+        "queue_depth": _worker.state()["queue_depth"],
     }
+
+
+@app.delete("/api/jobs/{job_id}")
+def cancel_job(job_id: str) -> dict[str, Any]:
+    """Cancel a queued job. Cannot kill a running job in phase 2 — that
+    requires the diffusion-step callback hook (phase 3)."""
+    db = get_db()
+    job = db.get_job(job_id)
+    if not job:
+        raise HTTPException(404, f"job {job_id} not found")
+    state = _worker.cancel(job_id)
+    if state == "queued":
+        return {"job_id": job_id, "cancelled": True}
+    if state == "running":
+        raise HTTPException(
+            409,
+            "Job is already running; mid-diffusion cancel ships in phase 3.",
+        )
+    # 'unknown' — not in flight; either finished, failed, or never enqueued.
+    return {"job_id": job_id, "cancelled": False, "reason": job["status"]}
 
 
 @app.get("/api/jobs")

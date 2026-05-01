@@ -72,11 +72,14 @@ class Database:
 
     # ── Jobs ─────────────────────────────────────────────────────────────────
     def insert_job(self, job_id: str, body: dict[str, Any]) -> None:
-        """Insert a job at status='running'. body is the raw GenerateBody dict
+        """Insert a job at status='queued'. body is the raw GenerateBody dict
         plus optional client_ip / user_agent / parent_job_id keys.
+
+        The worker calls mark_running() when it dequeues; finish_job() when it
+        completes or fails.
         """
         cols = (
-            "id created_at started_at status data prompt negative_prompt style model "
+            "id created_at status data prompt negative_prompt style model "
             "composition candidates steps guidance controlnet_scale tile_scale control_end "
             "refine refine_strength refine_steps size seed require_scan fast_mode "
             "hires_fix hires_target hires_strength adetailer adetailer_strength "
@@ -84,7 +87,7 @@ class Database:
         ).split()
         now = _now()
         values = (
-            job_id, now, now, "running",
+            job_id, now, "queued",
             body["data"], body["prompt"], body.get("negative_prompt"),
             body["style"], body["model"], body["composition"],
             body["candidates"], body["steps"], body["guidance"],
@@ -100,6 +103,13 @@ class Database:
             self.conn.execute(
                 f"INSERT INTO jobs ({','.join(cols)}) VALUES ({','.join('?'*len(cols))})",
                 values,
+            )
+
+    def mark_running(self, job_id: str) -> None:
+        with self._write_lock:
+            self.conn.execute(
+                "UPDATE jobs SET status='running', started_at=? WHERE id=? AND status='queued'",
+                (_now(), job_id),
             )
 
     def finish_job(
