@@ -175,7 +175,7 @@ class Generator:
         # Best: scans first, then highest scannability score, then lowest
         # controlnet_scale (= least visible QR). Score breaks ties when
         # multiple candidates scan, and when none scan it picks the closest
-        # one — which the C1 refine pass nudges over the threshold.
+        # one — which the C1 rescue pass nudges over the threshold.
         best = sorted(
             candidates,
             key=lambda c: (
@@ -185,6 +185,52 @@ class Generator:
             ),
         )[0]
         best_idx = candidates.index(best)
+
+        # C1: cheap in-generation rescue. If no candidate scanned but the
+        # best is close (score ≥ 0.70), do ONE more generation at scale
+        # +0.10 with the best seed +1. Cheaper than A2's full re-run, and
+        # often enough to push a borderline candidate over.
+        if not best.scans and best.scannability >= 0.70 and req.controlnet_scale < 1.5:
+            rescue_scale = round(req.controlnet_scale + 0.10, 2)
+            progress.emit(
+                "rescue_started",
+                from_score=round(best.scannability, 3),
+                from_scale=req.controlnet_scale,
+                to_scale=rescue_scale,
+            )
+            rescue_req = GenerationRequest(**{
+                **req.__dict__,
+                "controlnet_scale": rescue_scale,
+                "candidates": 1,
+                "seed": best.seed + 1,
+            })
+            rescue_progress = Progress(
+                publish=progress.publish,
+                is_cancelled=progress.is_cancelled,
+                # Show the rescue as one extra candidate beyond the original
+                # set so the UI's progress bar makes sense.
+                total_candidates=len(candidates) + 1,
+                candidate_idx=len(candidates),
+            )
+            rescue = self._make_candidate(
+                rescue_req, comp, best.seed + 1, prompt, negative, rescue_progress,
+            )
+            progress.emit(
+                "rescue_done",
+                scans=rescue.scans,
+                score=round(rescue.scannability, 3),
+            )
+            candidates.append(rescue)
+            # Re-pick best including the rescue candidate.
+            best = sorted(
+                candidates,
+                key=lambda c: (
+                    0 if c.scans else 1,
+                    -c.scannability,
+                    c.controlnet_scale,
+                ),
+            )[0]
+            best_idx = candidates.index(best)
 
         # Finishing passes — only run on the winner so we don't pay 3x for
         # them. Each pass re-scans; if it kills scannability we keep the

@@ -1091,6 +1091,16 @@
       loadPrompts();
       loadStats();
     });
+    es.addEventListener("rescue_started", (e) => {
+      const d = JSON.parse(e.data);
+      $("status").textContent =
+        `C1 rescue: best score ${d.from_score} → retrying at scale ${d.to_scale} · job ${jobId}`;
+    });
+    es.addEventListener("rescue_done", (e) => {
+      const d = JSON.parse(e.data);
+      $("status").textContent =
+        `Rescue ${d.scans ? "✓ scans" : "✗ still no"} (score ${d.score}) · job ${jobId}`;
+    });
     es.addEventListener("auto_escalated", (e) => {
       const d = JSON.parse(e.data);
       $("status").textContent =
