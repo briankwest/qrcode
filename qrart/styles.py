@@ -3,24 +3,34 @@ from __future__ import annotations
 # Each preset is (positive suffix, default negative). The user's prompt is
 # appended with the suffix; the negative prompt defaults to the listed one but
 # can be overridden via GenerationRequest.negative_prompt.
+#
+# C3: each negative includes "low contrast, washed out, foggy, hazy" — these
+# tokens push the model away from soft tonal regions where QR modules get
+# mushy and start failing scans. Marginal but consistent improvement to
+# scan rate without visible damage to realism.
+_QR_CONTRAST_NEG = "low contrast, washed out, foggy, hazy"
+
 STYLE_PRESETS: dict[str, tuple[str, str]] = {
     "photoreal": (
         "RAW photo, 8k uhd, DSLR, cinematic lighting, film grain, "
         "Kodak Portra 400, sharp focus, photographic, hyperdetailed, realistic skin texture",
-        "illustration, painting, drawing, art, sketch, cartoon, anime, render, "
-        "cgi, 3d, plastic, low quality, blurry, deformed, watermark, text, signature",
+        f"illustration, painting, drawing, art, sketch, cartoon, anime, render, "
+        f"cgi, 3d, plastic, low quality, blurry, deformed, watermark, text, signature, "
+        f"{_QR_CONTRAST_NEG}",
     ),
     "cinematic": (
         "cinematic, dramatic lighting, ultra detailed, octane render, masterpiece, 8k, vivid",
-        "low quality, blurry, deformed, watermark, text, ugly, jpeg artifacts",
+        f"low quality, blurry, deformed, watermark, text, ugly, jpeg artifacts, "
+        f"{_QR_CONTRAST_NEG}",
     ),
     "illustration": (
         "digital illustration, concept art, trending on artstation, masterpiece, vivid colors",
-        "low quality, blurry, deformed, watermark, photo, photographic, jpeg artifacts",
+        f"low quality, blurry, deformed, watermark, photo, photographic, jpeg artifacts, "
+        f"{_QR_CONTRAST_NEG}",
     ),
     "custom": (
         "",
-        "low quality, blurry, deformed, watermark, text",
+        f"low quality, blurry, deformed, watermark, text, {_QR_CONTRAST_NEG}",
     ),
 }
 
