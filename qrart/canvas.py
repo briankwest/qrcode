@@ -86,27 +86,30 @@ class CompositionInfo:
     scaffold: str
 
 
-# QR Monster v2 was trained with non-data regions as 50% gray (#808080),
-# not white. Feeding the v2 controlnet a gray-background QR lets the
-# diffusion paint darker photo content into light-module areas without
-# contradicting the controlnet signal — far more naturalistic integration.
-QR_V2_LIGHT_COLOR = "#808080"
-
-
 def build_composition(
     data: str,
     name: str,
     qr_monster_version: str = "v1",
 ) -> CompositionInfo:
+    """Build the composition layout + ground-truth QR control image.
+
+    Note on v2: an earlier revision rendered the v2 control image with a
+    gray (#808080) background per a community tip. Empirical testing
+    showed it produced clean photos with zero QR pattern at any scale we
+    were comfortable with — the lower gray-vs-black contrast in the
+    control input made the controlnet gradient too weak to drive
+    conditioning. The "gray background" tip seems to apply to img2img
+    init images, not the controlnet input. Both v1 and v2 use a
+    white-bg control image.
+    """
     cfg = COMPOSITIONS.get(name, COMPOSITIONS["standalone"])
     cw, ch = cfg["canvas_size"]
-    light = QR_V2_LIGHT_COLOR if qr_monster_version == "v2" else "white"
     return CompositionInfo(
         canvas_w=cw,
         canvas_h=ch,
         qr_size=cfg["qr_size"],
         qr_pos=cfg["qr_pos"],
-        qr_image=make_qr(data, size=cfg["qr_size"], light_color=light),
+        qr_image=make_qr(data, size=cfg["qr_size"]),
         scaffold=cfg["scaffold"],
     )
 

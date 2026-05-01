@@ -348,21 +348,36 @@ class Generator:
 
         def composite(qr_art: Image.Image) -> Image.Image:
             if scene is None:
-                # Standalone: no scene to paste into, but still reinforce
-                # the three finder corners over the diffusion output. Without
-                # this, sparse-content prompts (snow leopards on snow, cosmic
-                # galaxies, etc.) leave the corners as flat photo content
-                # with no QR pattern, and scanners can't locate the code.
-                return reinforce_finders(
-                    qr_art, req.data, (0, 0), qr_art.width,
-                )
+                # Standalone: no scene to paste into. Compositions get
+                # finder reinforcement built into composite_qr_into_scene,
+                # but for standalone we apply it conditionally below as a
+                # rescue — pasting the corner patterns onto a clean
+                # photo always would just slap visible squares onto subject
+                # content even when the QR scanned fine without them.
+                return qr_art
             return composite_qr_into_scene(
                 scene, qr_art, req.composition, data=req.data,
             )
 
-        if not req.refine:
-            final = composite(qr_pass1)
+        def composite_and_scan(qr_art: Image.Image) -> tuple[Image.Image, str | None]:
+            """Composite, scan, and apply standalone finder reinforcement
+            as a rescue if the un-reinforced result didn't decode.
+            Compositions skip the rescue path — they're already reinforced
+            inside composite_qr_into_scene.
+            """
+            final = composite(qr_art)
             decoded = scan(final)
+            if decoded != req.data and scene is None:
+                rescued = reinforce_finders(
+                    final, req.data, (0, 0), final.width,
+                )
+                rescued_decoded = scan(rescued)
+                if rescued_decoded == req.data:
+                    return rescued, rescued_decoded
+            return final, decoded
+
+        if not req.refine:
+            final, decoded = composite_and_scan(qr_pass1)
             return Candidate(
                 image=final,
                 pass1_image=None,
@@ -394,8 +409,7 @@ class Generator:
                 step_callback=progress.step_cb("refine", req.refine_steps),
                 cancel_check=progress.cancel_check,
             )
-            final = composite(qr_refined)
-            decoded = scan(final)
+            final, decoded = composite_and_scan(qr_refined)
             ok = decoded == req.data
             cand = Candidate(
                 image=final,
