@@ -1,3 +1,18 @@
+"""Multi-scanner ensemble for stylized QR codes.
+
+Three decoders, ordered by speed-then-capability:
+  1. cv2.QRCodeDetector — fastest, handles plain QRs, struggles with stylized.
+  2. zxing-cpp — Google's reference QR/barcode lib (the same family iOS uses
+     under the hood). Catches a meaningful fraction of stylized QRs that cv2
+     misses without the cost of YOLO inference.
+  3. qreader — YOLO-based detector + libzbar for decoding. Slowest but most
+     forgiving on heavily-stylized AI outputs.
+
+Each decoder is also tried over a small set of preprocessing variants
+(equalizeHist, adaptive threshold, scale up/down) since the "almost-scanned"
+candidates often need just a small tonal shift to decode.
+"""
+
 from __future__ import annotations
 
 import cv2
@@ -5,9 +20,6 @@ import numpy as np
 from PIL import Image
 
 
-# qreader uses a YOLO model for QR detection + libzbar/cv2 for decoding. It
-# matches iOS Camera-class scan capability for stylized AI-generated QRs that
-# cv2's plain QRCodeDetector misses. Lazy-loaded — first use downloads ~55MB.
 _qreader = None
 
 
@@ -23,7 +35,33 @@ def _to_cv(img: Image.Image) -> np.ndarray:
     return cv2.cvtColor(np.array(img.convert("RGB")), cv2.COLOR_RGB2BGR)
 
 
-def _try_decode(detector: cv2.QRCodeDetector, arr: np.ndarray) -> str | None:
+def _variants(img: Image.Image) -> list[np.ndarray]:
+    """Generate preprocessing variants for the cv2/zxing decoders. The
+    YOLO-based qreader does its own preprocessing so we feed it only the
+    original image."""
+    base = _to_cv(img)
+    gray = cv2.cvtColor(base, cv2.COLOR_BGR2GRAY)
+    h, w = base.shape[:2]
+    out: list[np.ndarray] = []
+
+    # Scale variants — different scanners prefer different module densities.
+    for s in (1.0, 0.75, 1.25, 0.5, 1.5, 2.0):
+        out.append(cv2.resize(base, (max(1, int(w * s)), max(1, int(h * s)))))
+
+    # Tonal variants.
+    out.append(cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR))
+    out.append(cv2.cvtColor(cv2.equalizeHist(gray), cv2.COLOR_GRAY2BGR))
+    th = cv2.adaptiveThreshold(
+        gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 31, 5
+    )
+    out.append(cv2.cvtColor(th, cv2.COLOR_GRAY2BGR))
+    blur = cv2.GaussianBlur(gray, (3, 3), 0)
+    _, otsu = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    out.append(cv2.cvtColor(otsu, cv2.COLOR_GRAY2BGR))
+    return out
+
+
+def _try_cv2(detector: cv2.QRCodeDetector, arr: np.ndarray) -> str | None:
     try:
         data, _, _ = detector.detectAndDecode(arr)
     except cv2.error:
@@ -31,33 +69,28 @@ def _try_decode(detector: cv2.QRCodeDetector, arr: np.ndarray) -> str | None:
     return data or None
 
 
-def _scan_cv2(img: Image.Image) -> str | None:
+def _scan_cv2(variants: list[np.ndarray]) -> str | None:
     detector = cv2.QRCodeDetector()
-    base = _to_cv(img)
-    gray = cv2.cvtColor(base, cv2.COLOR_BGR2GRAY)
-
-    variants: list[np.ndarray] = []
-    for s in (1.0, 0.75, 1.25, 0.5, 1.5, 2.0):
-        h, w = base.shape[:2]
-        variants.append(cv2.resize(base, (max(1, int(w * s)), max(1, int(h * s)))))
-
-    variants.append(cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR))
-    eq = cv2.equalizeHist(gray)
-    variants.append(cv2.cvtColor(eq, cv2.COLOR_GRAY2BGR))
-
-    th = cv2.adaptiveThreshold(
-        gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 31, 5
-    )
-    variants.append(cv2.cvtColor(th, cv2.COLOR_GRAY2BGR))
-
-    blur = cv2.GaussianBlur(gray, (3, 3), 0)
-    _, otsu = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    variants.append(cv2.cvtColor(otsu, cv2.COLOR_GRAY2BGR))
-
     for v in variants:
-        result = _try_decode(detector, v)
+        result = _try_cv2(detector, v)
         if result:
             return result
+    return None
+
+
+def _scan_zxing(variants: list[np.ndarray]) -> str | None:
+    try:
+        import zxingcpp
+    except ImportError:
+        return None
+    for v in variants:
+        try:
+            results = zxingcpp.read_barcodes(v)
+        except Exception:
+            continue
+        for r in results:
+            if r.text and r.format == zxingcpp.BarcodeFormat.QRCode:
+                return r.text
     return None
 
 
@@ -75,10 +108,10 @@ def _scan_qreader(img: Image.Image) -> str | None:
 
 
 def scan(img: Image.Image) -> str | None:
-    """Decode a QR. Tries cv2 first (fast, plain QRs), then qreader (YOLO-based,
-    handles stylized AI QRs that iOS Camera reads but cv2 doesn't).
-    """
-    result = _scan_cv2(img)
-    if result:
-        return result
-    return _scan_qreader(img)
+    """Decode a QR. Try cv2 → zxing → qreader. First success wins."""
+    variants = _variants(img)
+    return (
+        _scan_cv2(variants)
+        or _scan_zxing(variants)
+        or _scan_qreader(img)
+    )
