@@ -150,7 +150,10 @@ class Database:
         if not row:
             return None
         job = dict(row)
-        job["candidates"] = [
+        # job["candidates"] is the INTEGER count from the request — keep it.
+        # The joined candidate rows live under a separate key so a Remix /
+        # Rerun can read the count without confusion.
+        job["candidate_list"] = [
             dict(r)
             for r in self.conn.execute(
                 "SELECT * FROM candidates WHERE job_id = ? ORDER BY idx", (job_id,)
@@ -266,6 +269,61 @@ class Database:
         sql += " ORDER BY favorited DESC, last_used_at DESC LIMIT ?"
         params.append(limit)
         return [dict(r) for r in self.conn.execute(sql, params).fetchall()]
+
+    def set_prompt_favorite(self, prompt_id: int, favorited: bool) -> bool:
+        with self._write_lock:
+            cur = self.conn.execute(
+                "UPDATE prompts SET favorited = ? WHERE id = ?",
+                (int(bool(favorited)), prompt_id),
+            )
+        return cur.rowcount > 0
+
+    # ── Stats ────────────────────────────────────────────────────────────────
+    def stats(self) -> dict[str, Any]:
+        cur = self.conn.execute(
+            """
+            SELECT
+              COUNT(*) AS total,
+              SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) AS completed,
+              SUM(CASE WHEN status='failed'    THEN 1 ELSE 0 END) AS failed,
+              SUM(CASE WHEN status='cancelled' THEN 1 ELSE 0 END) AS cancelled,
+              SUM(CASE WHEN status='running'   THEN 1 ELSE 0 END) AS running,
+              SUM(CASE WHEN status='queued'    THEN 1 ELSE 0 END) AS queued,
+              SUM(CASE WHEN scans=1 THEN 1 ELSE 0 END) AS scanned,
+              AVG(CASE WHEN status='completed' THEN elapsed_s END) AS avg_elapsed_completed,
+              SUM(CASE WHEN status='completed' THEN elapsed_s ELSE 0 END) AS total_runtime_s
+            FROM jobs
+            """
+        ).fetchone()
+        totals = {k: cur[k] for k in cur.keys()}
+        scanned = totals.get("scanned") or 0
+        completed = totals.get("completed") or 0
+        scan_rate = (scanned / completed) if completed else None
+
+        by_model = [
+            dict(r) for r in self.conn.execute(
+                "SELECT model, COUNT(*) AS n,"
+                "  SUM(CASE WHEN scans=1 THEN 1 ELSE 0 END) AS scanned"
+                " FROM jobs GROUP BY model ORDER BY n DESC LIMIT 10"
+            ).fetchall()
+        ]
+        top_prompts = [
+            dict(r) for r in self.conn.execute(
+                "SELECT text, used_count, favorited FROM prompts"
+                " ORDER BY used_count DESC LIMIT 5"
+            ).fetchall()
+        ]
+        return {
+            **totals,
+            "scan_rate": scan_rate,
+            "avg_elapsed_completed": (
+                round(totals["avg_elapsed_completed"], 1)
+                if totals.get("avg_elapsed_completed") is not None
+                else None
+            ),
+            "by_model": by_model,
+            "top_prompts": top_prompts,
+        }
 
     # ── Recovery ─────────────────────────────────────────────────────────────
     def mark_orphans_failed(self) -> int:

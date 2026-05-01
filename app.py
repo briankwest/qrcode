@@ -328,6 +328,56 @@ def generate(body: GenerateBody, request: Request) -> dict[str, Any]:
     }
 
 
+@app.post("/api/jobs/{job_id}/rerun")
+def rerun_job(
+    job_id: str,
+    request: Request,
+    keep_seed: bool = False,
+) -> dict[str, Any]:
+    """One-click "Run again" — clones a past job's settings and enqueues it.
+
+    keep_seed=true reproduces the exact run; default keep_seed=false nulls
+    the seed so the worker rolls a fresh one and produces variations on the
+    same recipe. The new job links back via parent_job_id for lineage.
+
+    Distinct from "Remix" (a UI flow): Remix loads settings into the form
+    so the user can edit before submitting; rerun is fire-and-forget.
+    """
+    db = get_db()
+    src = db.get_job(job_id)
+    if not src:
+        raise HTTPException(404, f"job {job_id} not found")
+
+    body = GenerateBody(
+        data=src["data"],
+        prompt=src["prompt"],
+        style=src["style"],
+        model=src["model"],
+        negative_prompt=src.get("negative_prompt"),
+        candidates=src["candidates"],
+        steps=src["steps"],
+        controlnet_scale=src["controlnet_scale"],
+        tile_scale=src["tile_scale"],
+        control_end=src["control_end"],
+        guidance=src["guidance"],
+        refine=bool(src["refine"]),
+        refine_strength=src["refine_strength"],
+        refine_steps=src["refine_steps"],
+        size=src["size"],
+        composition=src["composition"],
+        seed=src["seed"] if keep_seed else None,
+        require_scan=bool(src["require_scan"]),
+        fast_mode=bool(src["fast_mode"]),
+        hires_fix=bool(src["hires_fix"]),
+        hires_target=src["hires_target"],
+        hires_strength=src["hires_strength"],
+        adetailer=bool(src["adetailer"]),
+        adetailer_strength=src["adetailer_strength"],
+        parent_job_id=job_id,
+    )
+    return generate(body, request)
+
+
 @app.delete("/api/jobs/{job_id}")
 def cancel_job(job_id: str) -> dict[str, Any]:
     """Cancel a job. If queued, it'll be skipped on dequeue. If running, the
@@ -342,6 +392,36 @@ def cancel_job(job_id: str) -> dict[str, Any]:
     if state in ("queued", "running"):
         return {"job_id": job_id, "cancelled": True, "was": state}
     return {"job_id": job_id, "cancelled": False, "reason": job["status"]}
+
+
+@app.get("/api/prompts/recent")
+def list_recent_prompts(limit: int = 20, favorites_only: bool = False) -> dict[str, Any]:
+    db = get_db()
+    return {
+        "prompts": db.list_prompts(
+            limit=max(1, min(limit, 100)),
+            favorites_only=favorites_only,
+        ),
+    }
+
+
+class FavoriteBody(BaseModel):
+    favorited: bool = True
+
+
+@app.post("/api/prompts/{prompt_id}/favorite")
+def set_favorite(prompt_id: int, body: FavoriteBody) -> dict[str, Any]:
+    db = get_db()
+    ok = db.set_prompt_favorite(prompt_id, body.favorited)
+    if not ok:
+        raise HTTPException(404, f"prompt {prompt_id} not found")
+    return {"prompt_id": prompt_id, "favorited": body.favorited}
+
+
+@app.get("/api/stats")
+def stats() -> dict[str, Any]:
+    db = get_db()
+    return db.stats()
 
 
 @app.get("/api/jobs/{job_id}/stream")

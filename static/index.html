@@ -205,6 +205,70 @@
   .badge.bad { color: var(--bad); }
   .badge.pass1 { left: 6px; right: auto; background: rgba(124,92,255,0.5); color: #fff; }
 
+  .prompt-chip {
+    display: inline-flex; align-items: center; gap: 4px;
+    background: var(--panel-2); border: 1px solid var(--border);
+    border-radius: 999px; padding: 3px 8px 3px 6px;
+    font-size: 11px; color: var(--text); cursor: pointer;
+    max-width: 220px;
+  }
+  .prompt-chip:hover { border-color: var(--accent); }
+  .prompt-chip .text {
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    max-width: 180px;
+  }
+  .prompt-chip .star {
+    cursor: pointer; color: var(--muted); font-size: 12px;
+    line-height: 1; padding: 0 2px;
+  }
+  .prompt-chip.fav .star { color: gold; }
+
+  #historyStats {
+    font-size: 10px; color: var(--muted); margin: -6px 0 8px;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  }
+
+  .history-row {
+    display: grid; grid-template-columns: 56px 1fr auto; gap: 12px;
+    padding: 8px; border: 1px solid var(--border); border-radius: 8px;
+    background: var(--panel-2); align-items: center;
+  }
+  .history-row + .history-row { margin-top: 6px; }
+  .history-row:hover { border-color: var(--accent); }
+  .history-thumb {
+    width: 56px; height: 56px; object-fit: cover; border-radius: 6px;
+    background: var(--panel);
+  }
+  .history-thumb.placeholder {
+    display: flex; align-items: center; justify-content: center;
+    font-size: 10px; color: var(--muted);
+  }
+  .history-meta { min-width: 0; }
+  .history-prompt {
+    font-size: 12px; color: var(--text);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .history-tags {
+    display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 10px;
+  }
+  .history-tags .chip {
+    padding: 1px 6px; border-radius: 999px; border: 1px solid var(--border);
+    background: var(--panel); color: var(--muted);
+  }
+  .history-tags .chip.good { color: var(--good); border-color: rgba(45,212,191,0.3); }
+  .history-tags .chip.bad { color: var(--bad); border-color: rgba(248,113,113,0.3); }
+  .history-tags .chip.run { color: var(--accent-2); border-color: rgba(0,212,255,0.3); }
+  .history-actions {
+    display: flex; flex-direction: column; gap: 4px;
+  }
+  .history-actions button {
+    background: var(--panel); border: 1px solid var(--border);
+    color: var(--text); font-size: 11px; padding: 4px 8px;
+    border-radius: 6px; cursor: pointer; white-space: nowrap;
+  }
+  .history-actions button:hover { border-color: var(--accent); color: var(--accent); }
+
   .compare {
     display: grid; grid-template-columns: 1fr 1fr; gap: 12px;
   }
@@ -259,6 +323,7 @@
     </details>
 
     <label for="prompt">Prompt</label>
+    <div id="promptPicker" style="display:none;flex-wrap:wrap;gap:4px;margin-bottom:6px;max-height:90px;overflow-y:auto;"></div>
     <textarea id="prompt" placeholder="describe what the image should look like">a majestic snow leopard standing on a cliff at sunrise, dramatic lighting, mountains in background</textarea>
 
     <label for="model">Model</label>
@@ -470,6 +535,26 @@
       <div class="preview" id="qrPreview" style="aspect-ratio: 1/1; max-width: 240px;">
         <div class="placeholder">QR will appear here</div>
       </div>
+    </div>
+
+    <div class="panel" id="historyPanel">
+      <h2 style="display:flex;justify-content:space-between;align-items:center;">
+        <span>History</span>
+        <button id="historyRefresh" style="background:transparent;border:0;color:var(--muted);font-size:11px;cursor:pointer;">↻ refresh</button>
+      </h2>
+      <div id="historyStats">…</div>
+      <input type="text" id="historySearch" placeholder="Search prompts and decoded URLs…"
+             style="margin-bottom:8px;" />
+      <div style="display:flex;gap:6px;font-size:11px;color:var(--muted);margin-bottom:8px;">
+        <label style="display:flex;align-items:center;gap:4px;margin:0;cursor:pointer;">
+          <input type="checkbox" id="historyOnlyScans" /> only scans
+        </label>
+        <select id="historyModelFilter" style="font-size:11px;padding:2px 6px;width:auto;">
+          <option value="">all models</option>
+        </select>
+      </div>
+      <div id="historyList"></div>
+      <button id="historyLoadMore" style="display:none;width:100%;margin-top:8px;background:var(--panel-2);border:1px solid var(--border);color:var(--text);padding:8px;border-radius:6px;cursor:pointer;font-size:12px;">Load more</button>
     </div>
   </section>
 </main>
@@ -840,7 +925,9 @@
       hires_strength: parseFloat($("hiresStrength").value),
       adetailer: adetailerSwitch.classList.contains("on"),
       adetailer_strength: parseFloat($("adetailerStrength").value),
+      parent_job_id: formParentJobId,
     };
+    formParentJobId = null;  // single-shot — next generate is a fresh root
 
     try {
       const r = await fetch("/api/generate", {
@@ -959,6 +1046,9 @@
       $("go").disabled = false;
       teardownStream();
       refreshHealth();
+      loadHistory(false);
+      loadPrompts();
+      loadStats();
     });
     es.addEventListener("failed", async (e) => {
       const d = JSON.parse(e.data);
@@ -968,6 +1058,9 @@
       $("go").disabled = false;
       teardownStream();
       refreshHealth();
+      loadHistory(false);
+      loadPrompts();
+      loadStats();
     });
     es.addEventListener("cancelled", () => {
       $("preview").innerHTML = `<div class="placeholder"><strong>Cancelled</strong></div>`;
@@ -975,6 +1068,9 @@
       $("go").disabled = false;
       teardownStream();
       refreshHealth();
+      loadHistory(false);
+      loadPrompts();
+      loadStats();
     });
     es.onerror = () => {
       // Network blip — try a one-shot fallback fetch in case we missed the
@@ -992,7 +1088,8 @@
 
   function renderJob(j) {
     // Map DB row shape -> existing renderers' expected fields.
-    const cands = (j.candidates || []).map((c, i) => ({
+    // candidate_list is the joined rows; j.candidates (int) is the count.
+    const cands = (j.candidate_list || []).map((c, i) => ({
       id: c.id,
       index: c.idx,
       url: c.image_path,
@@ -1009,6 +1106,284 @@
     if (cands.length) showCandidate(cands[bestIndex >= 0 ? bestIndex : 0]);
     $("status").textContent =
       `Done in ${j.elapsed_s}s · ${j.scans ? "decoded" : "did not decode"} · job ${j.id}`;
+  }
+
+  // ── History panel ────────────────────────────────────────────────────────
+  // Fetches /api/jobs with the current filters and renders rows. Each row
+  // has Remix (load settings into the form) and Run again (server-side
+  // clone + enqueue). Auto-refreshes when a job lands.
+  const HISTORY_PAGE = 25;
+  let historyOffset = 0;
+
+  function relTime(iso) {
+    const t = new Date(iso + (iso.endsWith("Z") ? "" : "Z")).getTime();
+    const dt = (Date.now() - t) / 1000;
+    if (dt < 60) return `${Math.round(dt)}s ago`;
+    if (dt < 3600) return `${Math.round(dt / 60)}m ago`;
+    if (dt < 86400) return `${Math.round(dt / 3600)}h ago`;
+    return new Date(t).toLocaleDateString();
+  }
+
+  function buildHistoryQuery(extraOffset = 0) {
+    const params = new URLSearchParams();
+    params.set("limit", HISTORY_PAGE);
+    params.set("offset", extraOffset);
+    const q = $("historySearch").value.trim();
+    if (q) params.set("q", q);
+    if ($("historyOnlyScans").checked) params.set("scans", "true");
+    const m = $("historyModelFilter").value;
+    if (m) params.set("model", m);
+    return params.toString();
+  }
+
+  async function loadHistory(append = false) {
+    const offset = append ? historyOffset : 0;
+    const r = await fetch(`/api/jobs?${buildHistoryQuery(offset)}`);
+    const j = await r.json();
+    const list = $("historyList");
+    if (!append) list.innerHTML = "";
+    if (j.jobs.length === 0 && !append) {
+      list.innerHTML = `<div style="color:var(--muted);font-size:12px;padding:8px;">No matching jobs.</div>`;
+      $("historyLoadMore").style.display = "none";
+      return;
+    }
+    for (const job of j.jobs) {
+      list.appendChild(renderHistoryRow(job));
+    }
+    historyOffset = offset + j.jobs.length;
+    $("historyLoadMore").style.display = j.jobs.length === HISTORY_PAGE ? "block" : "none";
+  }
+
+  function renderHistoryRow(job) {
+    const div = document.createElement("div");
+    div.className = "history-row";
+    const thumb = job.qr_image_path && job.status === "completed"
+      ? `<img class="history-thumb" src="${job.qr_image_path.replace(/qr\.png$/, "")}cand0.png" alt="" loading="lazy" onerror="this.style.display='none'" />`
+      : `<div class="history-thumb placeholder">${job.status[0].toUpperCase()}</div>`;
+    const scansBadge = job.scans === 1
+      ? `<span class="chip good">scans</span>`
+      : job.scans === 0
+        ? `<span class="chip bad">no scan</span>`
+        : `<span class="chip">${job.status}</span>`;
+    const promptText = (job.prompt || "").slice(0, 60) + (job.prompt && job.prompt.length > 60 ? "…" : "");
+    div.innerHTML = `
+      ${thumb}
+      <div class="history-meta">
+        <div class="history-prompt" title="${escapeHtml(job.prompt || "")}">${escapeHtml(promptText)}</div>
+        <div class="history-tags">
+          <span class="chip">${job.model}</span>
+          ${scansBadge}
+          ${job.composition !== "standalone" ? `<span class="chip">${job.composition}</span>` : ""}
+          ${job.elapsed_s ? `<span class="chip">${job.elapsed_s}s</span>` : ""}
+          <span class="chip" title="${job.created_at}">${relTime(job.created_at)}</span>
+          ${job.parent_job_id ? `<span class="chip run">remix</span>` : ""}
+        </div>
+      </div>
+      <div class="history-actions">
+        <button data-act="remix" data-id="${job.id}">↻ Remix</button>
+        <button data-act="run-again" data-id="${job.id}">↻ Run again</button>
+      </div>
+    `;
+    div.querySelector('[data-act="remix"]').addEventListener("click", (e) => {
+      e.stopPropagation();
+      remixJob(job.id);
+    });
+    div.querySelector('[data-act="run-again"]').addEventListener("click", (e) => {
+      e.stopPropagation();
+      runAgain(job.id);
+    });
+    return div;
+  }
+
+  function escapeHtml(s) {
+    return s.replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+  }
+
+  async function remixJob(jobId) {
+    const r = await fetch(`/api/jobs/${jobId}`);
+    if (!r.ok) {
+      $("status").textContent = `Couldn't load ${jobId}`;
+      return;
+    }
+    const j = await r.json();
+    populateFormFromJob(j);
+    $("status").textContent = `Remixing ${jobId} — edit anything, then hit Generate.`;
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
+  function populateFormFromJob(j) {
+    // QR data: dump into a Text field. Reverse-detecting URL/wifi/etc. by
+    // payload prefix is a future enhancement; text always round-trips.
+    if (/^https?:\/\//i.test(j.data || "")) {
+      $("qrType").value = "url";
+      renderQRFields("url");
+      const urlInput = document.querySelector('#qrFields [data-field="url"]');
+      if (urlInput) urlInput.value = j.data;
+    } else {
+      $("qrType").value = "text";
+      renderQRFields("text");
+      const txt = document.querySelector('#qrFields [data-field="text"]');
+      if (txt) txt.value = j.data;
+    }
+    updatePayloadPreview();
+
+    $("prompt").value = j.prompt || "";
+    $("style").value = j.style || "photoreal";
+    $("model").value = j.model || "photoreal";
+    $("composition").value = j.composition || "standalone";
+    renderCompositionDiagram($("composition").value);
+
+    setSlider("scale", j.controlnet_scale);
+    setSlider("tileScale", j.tile_scale);
+    setSlider("steps", j.steps);
+    setSlider("candidates", j.candidates);
+    setSlider("refineStrength", j.refine_strength);
+    $("size").value = j.size;
+    $("seed").value = j.seed != null ? j.seed : "";
+
+    setSwitch("refineSwitch", !!j.refine);
+    $("refineControls").style.display = j.refine ? "block" : "none";
+    setSwitch("fastSwitch", !!j.fast_mode);
+    setSwitch("hiresSwitch", !!j.hires_fix);
+    $("hiresControls").style.display = j.hires_fix ? "block" : "none";
+    if (j.hires_target) setSlider("hiresTarget", j.hires_target);
+    if (j.hires_strength != null) setSlider("hiresStrength", j.hires_strength);
+    setSwitch("adetailerSwitch", !!j.adetailer);
+    $("adetailerControls").style.display = j.adetailer ? "block" : "none";
+    if (j.adetailer_strength != null) setSlider("adetailerStrength", j.adetailer_strength);
+
+    // Parent linkage: stored on the form so the next Generate sends it.
+    formParentJobId = j.id;
+  }
+
+  function setSlider(id, value) {
+    const el = $(id);
+    if (!el || value == null) return;
+    el.value = value;
+    const out = $(id + "Val");
+    if (out) out.textContent = parseFloat(value).toFixed(el.step.includes(".") ? 2 : 0);
+  }
+
+  function setSwitch(id, on) {
+    const el = $(id);
+    if (!el) return;
+    el.classList.toggle("on", !!on);
+  }
+
+  let formParentJobId = null;
+
+  async function runAgain(jobId) {
+    try {
+      const r = await fetch(`/api/jobs/${jobId}/rerun`, { method: "POST" });
+      if (r.status === 503) {
+        $("status").textContent = "Queue full — try again in a moment.";
+        return;
+      }
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const ack = await r.json();
+      currentJobId = ack.job_id;
+      $("status").textContent = `Run again · queued · ${ack.job_id}`;
+      $("cancelBtn").style.display = "block";
+      $("progress").style.display = "block";
+      setProgress("queued", "waiting", 0);
+      $("go").disabled = true;
+      subscribeSSE(ack.job_id);
+      refreshHealth();
+    } catch (e) {
+      $("status").textContent = `Run again failed: ${e.message}`;
+    }
+  }
+
+  // Filter handlers — debounce search a bit so each keystroke isn't a request.
+  let historyDebounce = null;
+  $("historySearch").addEventListener("input", () => {
+    clearTimeout(historyDebounce);
+    historyDebounce = setTimeout(() => loadHistory(false), 200);
+  });
+  $("historyOnlyScans").addEventListener("change", () => loadHistory(false));
+  $("historyModelFilter").addEventListener("change", () => loadHistory(false));
+  $("historyRefresh").addEventListener("click", () => loadHistory(false));
+  $("historyLoadMore").addEventListener("click", () => loadHistory(true));
+
+  // Populate model filter from health, then load history. Re-load whenever
+  // a job finishes so the new row appears at the top.
+  (async () => {
+    const h = await refreshHealth();
+    if (h?.models) {
+      const sel = $("historyModelFilter");
+      for (const m of h.models) {
+        const opt = document.createElement("option");
+        opt.value = m;
+        opt.textContent = m;
+        sel.appendChild(opt);
+      }
+    }
+    loadHistory(false);
+    loadPrompts();
+    loadStats();
+  })();
+
+  // ── Prompt picker ────────────────────────────────────────────────────────
+  // Chips show recent + favorited prompts. Click fills the textarea, star
+  // toggles favorite. Refreshed after each successful generate.
+  async function loadPrompts() {
+    try {
+      const r = await fetch("/api/prompts/recent?limit=15");
+      const j = await r.json();
+      renderPromptChips(j.prompts || []);
+    } catch {}
+  }
+
+  function renderPromptChips(prompts) {
+    const box = $("promptPicker");
+    box.innerHTML = "";
+    if (!prompts.length) {
+      box.style.display = "none";
+      return;
+    }
+    box.style.display = "flex";
+    for (const p of prompts) {
+      const chip = document.createElement("span");
+      chip.className = "prompt-chip" + (p.favorited ? " fav" : "");
+      chip.title = p.text;
+      const star = document.createElement("span");
+      star.className = "star";
+      star.textContent = p.favorited ? "★" : "☆";
+      star.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        await fetch(`/api/prompts/${p.id}/favorite`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ favorited: !p.favorited }),
+        });
+        loadPrompts();
+      });
+      const text = document.createElement("span");
+      text.className = "text";
+      text.textContent = p.text;
+      chip.appendChild(star);
+      chip.appendChild(text);
+      chip.addEventListener("click", () => {
+        $("prompt").value = p.text;
+      });
+      box.appendChild(chip);
+    }
+  }
+
+  // ── Stats ────────────────────────────────────────────────────────────────
+  async function loadStats() {
+    try {
+      const r = await fetch("/api/stats");
+      const s = await r.json();
+      const total = s.total || 0;
+      const completed = s.completed || 0;
+      const scanRate = s.scan_rate != null ? `${(s.scan_rate * 100).toFixed(0)}%` : "–";
+      const avg = s.avg_elapsed_completed != null ? `${s.avg_elapsed_completed}s` : "–";
+      $("historyStats").textContent =
+        `${total} total · ${completed} done · ${scanRate} scan · avg ${avg}`;
+    } catch {
+      $("historyStats").textContent = "";
+    }
   }
 </script>
 </body>
