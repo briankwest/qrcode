@@ -232,9 +232,20 @@
     display: grid; grid-template-columns: 56px 1fr auto; gap: 12px;
     padding: 8px; border: 1px solid var(--border); border-radius: 8px;
     background: var(--panel-2); align-items: center;
+    position: relative;
   }
   .history-row + .history-row { margin-top: 6px; }
   .history-row:hover { border-color: var(--accent); }
+  .history-row .history-thumb,
+  .history-row .history-meta { cursor: pointer; }
+  .history-row.active { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(124,92,255,0.2); }
+  .history-delete {
+    position: absolute; top: 4px; right: 6px;
+    background: transparent; border: 0; color: var(--muted);
+    font-size: 14px; line-height: 1; cursor: pointer; padding: 2px 6px;
+    border-radius: 4px;
+  }
+  .history-delete:hover { background: rgba(248,113,113,0.15); color: var(--bad); }
   .history-thumb {
     width: 56px; height: 56px; object-fit: cover; border-radius: 6px;
     background: var(--panel);
@@ -1177,6 +1188,7 @@
         : `<span class="chip">${job.status}</span>`;
     const promptText = (job.prompt || "").slice(0, 60) + (job.prompt && job.prompt.length > 60 ? "…" : "");
     div.innerHTML = `
+      <button class="history-delete" data-act="delete" title="Delete this run">×</button>
       ${thumb}
       <div class="history-meta">
         <div class="history-prompt" title="${escapeHtml(job.prompt || "")}">${escapeHtml(promptText)}</div>
@@ -1195,6 +1207,13 @@
         ${job.status === "failed" ? `<button data-act="show-error" data-id="${job.id}">View error</button>` : ""}
       </div>
     `;
+    // Click on the thumbnail or meta area loads the run into the preview.
+    const onView = (e) => {
+      e.stopPropagation();
+      loadJobIntoPreview(job.id, div);
+    };
+    div.querySelector(".history-thumb")?.addEventListener("click", onView);
+    div.querySelector(".history-meta")?.addEventListener("click", onView);
     div.querySelector('[data-act="remix"]').addEventListener("click", (e) => {
       e.stopPropagation();
       remixJob(job.id);
@@ -1202,6 +1221,10 @@
     div.querySelector('[data-act="run-again"]').addEventListener("click", (e) => {
       e.stopPropagation();
       runAgain(job.id);
+    });
+    div.querySelector('[data-act="delete"]').addEventListener("click", (e) => {
+      e.stopPropagation();
+      deleteJob(job.id, div);
     });
     const errBtn = div.querySelector('[data-act="show-error"]');
     if (errBtn) {
@@ -1223,6 +1246,44 @@
 
   function escapeHtml(s) {
     return s.replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+  }
+
+  async function loadJobIntoPreview(jobId, rowEl) {
+    try {
+      const r = await fetch(`/api/jobs/${jobId}`);
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const j = await r.json();
+      if (j.status !== "completed" || !(j.candidate_list || []).length) {
+        $("status").textContent = `Job ${jobId} (${j.status}) has no viewable candidates`;
+        return;
+      }
+      renderJob(j);
+      // Highlight the active row.
+      document.querySelectorAll(".history-row.active").forEach((el) => el.classList.remove("active"));
+      if (rowEl) rowEl.classList.add("active");
+    } catch (e) {
+      $("status").textContent = `Couldn't load ${jobId}: ${e.message}`;
+    }
+  }
+
+  async function deleteJob(jobId, rowEl) {
+    if (!confirm(`Delete job ${jobId}? This removes all candidates and their image files.`)) return;
+    try {
+      const r = await fetch(`/api/jobs/${jobId}`, { method: "DELETE" });
+      const j = await r.json().catch(() => ({}));
+      if (j.deleted) {
+        if (rowEl) rowEl.remove();
+        $("status").textContent = `Deleted ${jobId}`;
+        loadStats();
+      } else if (j.cancelled) {
+        $("status").textContent = `Job ${jobId} was running — cancelled instead. Click delete again once it's terminal.`;
+        loadHistory(false);
+      } else {
+        $("status").textContent = `Couldn't delete ${jobId}`;
+      }
+    } catch (e) {
+      $("status").textContent = `Delete failed: ${e.message}`;
+    }
   }
 
   async function remixJob(jobId) {

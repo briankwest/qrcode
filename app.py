@@ -450,19 +450,27 @@ def rerun_job(
 
 
 @app.delete("/api/jobs/{job_id}")
-def cancel_job(job_id: str) -> dict[str, Any]:
-    """Cancel a job. If queued, it'll be skipped on dequeue. If running, the
-    diffusion step callback raises CancelledByUser at the next step boundary
-    and the worker writes status='cancelled'.
+def cancel_or_delete_job(job_id: str) -> dict[str, Any]:
+    """Smart DELETE: cancel if the job is in flight, hard-delete if terminal.
+
+    - queued / running -> cancel (worker's cancel set; running jobs are
+      caught at the next diffusion step boundary).
+    - completed / failed / cancelled -> remove the row + cascade candidates
+      and events, plus rm -rf outputs/{id}/ on disk.
     """
     db = get_db()
     job = db.get_job(job_id)
     if not job:
         raise HTTPException(404, f"job {job_id} not found")
+
     state = _worker.cancel(job_id)
     if state in ("queued", "running"):
         return {"job_id": job_id, "cancelled": True, "was": state}
-    return {"job_id": job_id, "cancelled": False, "reason": job["status"]}
+
+    # Terminal state — hard delete row + files.
+    db.delete_job(job_id)
+    _cleanup_evicted_files([job_id])
+    return {"job_id": job_id, "deleted": True, "was": job["status"]}
 
 
 @app.get("/api/prompts/recent")

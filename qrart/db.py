@@ -325,6 +325,13 @@ class Database:
             "top_prompts": top_prompts,
         }
 
+    def delete_job(self, job_id: str) -> bool:
+        """Hard-delete a job. ON DELETE CASCADE removes candidates + events.
+        Caller is responsible for rm -rf'ing the outputs/{id}/ directory."""
+        with self._write_lock:
+            cur = self.conn.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
+        return cur.rowcount > 0
+
     # ── Retention ────────────────────────────────────────────────────────────
     def evict_old_jobs(self, keep: int = 1000) -> list[str]:
         """Keep the most recent `keep` jobs, delete the rest. Returns the
